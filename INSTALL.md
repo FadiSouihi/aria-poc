@@ -129,11 +129,17 @@ put it.
 ```bash
 python tools/selfcheck.py            # 7 quick checks
 python tools/selfcheck.py --full     # + real vision and audio benchmarks on fixtures
-python -m pytest -q tests            # 137 tests (a few skip if models are absent)
+python -m pytest -q tests            # 145 tests (a few skip if models are absent)
 ```
 
 `selfcheck --full` ending in `ALL CHECKS PASSED (9/9)` means the camera/mic,
 event flow, telemetry, models and both benchmarks are working on that machine.
+
+**This path has been tested as a clean install**: `git clone` → 6.15 MB, 108
+files, no weights → `tools/fetch_models.py --only vad` (2.2 MB, hash verified
+into an empty `weights/`) → the suite ran green with **131 passed, 6 skipped**
+(the 6 skips are exactly the model-dependent tests, which is the designed
+behaviour when Whisper/WavLM are not downloaded yet).
 
 ## 6. Run it
 

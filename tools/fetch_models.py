@@ -204,7 +204,7 @@ def check(model: Model) -> str:
     path = model.path
     if not path.exists():
         return "missing"
-    if model.size and abs(path.stat().st_size - model.size) > 1024:
+    if model.size and path.stat().st_size != model.size:
         return "wrong-size"
     if model.sha256 and sha256_of(path) != model.sha256:
         return "wrong-hash"

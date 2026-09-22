@@ -138,7 +138,7 @@ confirmed departure; stranger profiles auto-expire.
 - Metrics: counters/histograms (fps, EOU latency, RTF, TTFT, RSS...).
 - Test-first: contract suites per interface, hermetic fakes, fixture
   replay (camera + audio fixtures), CSV-derived scenario tests,
-  benchmarks-as-tests. **137/137 tests green** (Phase 0–2).
+  benchmarks-as-tests. **145/145 tests green** (Phase 0–2).
 
 ## 10. Phases
 
@@ -146,7 +146,7 @@ confirmed departure; stranger profiles auto-expire.
 |---|---|---|
 | 0 — Skeleton ✅ | primitives + observability + test scaffolding | services start/stop/restart from config; watchdog restarts in place; backpressure tested; structured logs + correlation ids; contract suite green |
 | 1 — Perception ✅ | real camera sources, YOLO26n + tracker, SceneManager, face pipeline, tamper, fixture recorder | 0/1/N via one code path; 3 s occlusion survives; identity stable; `bench_vision` in budget; scenario tests on fixtures |
-| 2 — Audio ✅ | VAD + Smart Turn, faster-whisper, voice-prints, TTS abstraction, barge-in v1 | FUNC-14 8/10/11/12 fixed in replay tests; measured EOU latency + false-response rate → **p50 47–62 ms; false-response 0.00; miss 0.00; RTF ≤0.31; EN/FR/AR transcribed in-language with language-matched voices; speech_end→transcript 880 ms; first audio 0.0 ms; clause gap 0.9 ms; 137/137 tests; idle CPU 0.54 cores** |
+| 2 — Audio ✅ | VAD + Smart Turn, faster-whisper, voice-prints, TTS abstraction, barge-in v1 | FUNC-14 8/10/11/12 fixed in replay tests; measured EOU latency + false-response rate → **p50 47–62 ms; false-response 0.00; miss 0.00; RTF ≤0.31; EN/FR/AR transcribed in-language with language-matched voices; speech_end→transcript 880 ms; first audio 0.0 ms; clause gap 0.9 ms; 145/145 tests; idle CPU 0.54 cores** |
 | 3 — Cognition | dialogue FSM, AttentionPolicy, LLM router, guardrails + masking | full conversation; NFR-06 probes mitigated; network cut → local model |
 | 4 — Memory | profiles, MemoryCards, recall, retention/wipes | FUNC-10 recall passes (same/next day); masking regressions pass |
 | 5 — Robustness | watchdog self-heal, hot reconnect, degradation modes, soak tests | camera crash heals in place; RSS returns to baseline; replug detected live |

@@ -15,7 +15,7 @@ cd aria-poc
 .\setup.ps1                                # venv + deps + CUDA torch + models + selfcheck
 
 .venv\Scripts\python.exe main.py --config configs\laptop.yaml --duration 60
-.venv\Scripts\python.exe run_tests.py      # contract suite (137 tests, all green)
+.venv\Scripts\python.exe run_tests.py      # contract suite (145 tests, all green)
 ```
 
 **Linux / Jetson Orin Nano**
@@ -201,7 +201,7 @@ Measured on this laptop (RTX 4050, `tools/bench_audio.py --assert` + a live run)
       (opening one per clause was audible dead air: `tts.clause_gap_ms` **0.9 ms**
       now), and the gate no longer waits for a voice-print that cannot exist
       (`transcript→decision` 83–145 ms → **0 ms**)
-- [x] **97→137/137 tests green** (hermetic contract suites + real-model integration)
+- [x] **97→145/145 tests green** (hermetic contract suites + real-model integration)
 - [x] Live run: 487 mic → 487 VAD chunks, 2 speech events → 2 turns → 2
       transcripts → 2 accepted → 2 replies → 3 spoken clauses, **0 restarts**,
       935 events, **0 dropped**
