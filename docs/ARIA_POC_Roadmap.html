@@ -1,0 +1,441 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>ARIA-POC — Architecture Analysis & Roadmap</title>
+<style>
+  @page { size: A4; margin: 17mm 15mm 17mm 15mm; }
+  * { box-sizing: border-box; }
+  body { font-family: "Segoe UI", Arial, sans-serif; font-size: 10pt; line-height: 1.45; color: #1c2333; margin: 0; }
+  h1 { font-size: 16.5pt; color: #0f3460; border-bottom: 2.5px solid #0f3460; padding-bottom: 4px; margin: 2px 0 10px 0; }
+  h2 { font-size: 12.5pt; color: #0f3460; margin: 13px 0 5px; }
+  h3 { font-size: 10.8pt; color: #16537e; margin: 10px 0 3px; }
+  p { margin: 4px 0 8px; }
+  ul, ol { margin: 3px 0 8px 20px; padding: 0; }
+  li { margin: 2.5px 0; }
+  table { width: 100%; border-collapse: collapse; margin: 6px 0 10px; font-size: 8.7pt; }
+  th { background: #0f3460; color: #ffffff; text-align: left; padding: 4px 6px; font-weight: 600; }
+  td { border: 1px solid #c9d4e3; padding: 4px 6px; vertical-align: top; }
+  tr:nth-child(even) td { background: #f4f7fb; }
+  code { font-family: Consolas, "Courier New", monospace; font-size: 8.8pt; background: #eef2f8; padding: 0 3px; border-radius: 2px; }
+  pre { font-family: Consolas, "Courier New", monospace; font-size: 7.8pt; background: #0f3460; color: #dbe6ff; padding: 10px 12px; border-radius: 5px; line-height: 1.3; white-space: pre; page-break-inside: avoid; }
+  .section { page-break-before: always; }
+  .cover { text-align: left; padding-top: 55mm; }
+  .cover .title { font-size: 26pt; font-weight: 700; color: #0f3460; line-height: 1.15; margin-bottom: 6px; }
+  .cover .subtitle { font-size: 13pt; color: #3d5072; margin-bottom: 26px; }
+  .cover .meta { font-size: 10pt; color: #55627a; }
+  .doc-control { margin-top: 30px; width: 70%; font-size: 9pt; }
+  .doc-control td { border: none; border-bottom: 1px solid #d5deea; background: none !important; padding: 3px 4px; }
+  .doc-control td.k { color: #7c8aa0; width: 38%; }
+  .toc { margin-top: 26px; font-size: 10pt; column-count: 2; column-gap: 24px; }
+  .toc div { margin: 3px 0; color: #2a3a55; }
+  .note { border-left: 3px solid #e9a23b; background: #fdf6e9; padding: 6px 10px; margin: 8px 0; font-size: 9.3pt; page-break-inside: avoid; }
+  .pill { display: inline-block; background: #0f3460; color: #fff; border-radius: 3px; padding: 1px 7px; font-size: 8.5pt; margin-right: 4px; }
+  .footer-mark { margin-top: 18px; font-size: 8.5pt; color: #8a94a8; border-top: 1px solid #d5deea; padding-top: 5px; }
+</style>
+</head>
+<body>
+
+<!-- ============ COVER ============ -->
+<div class="cover">
+  <div class="title">ARIA-POC<br>Unified Perception & Session-Aware Interaction</div>
+  <div class="subtitle">Architecture Analysis & Implementation Roadmap for a Security/Receptionist Robot Prototype</div>
+  <div class="meta">
+    Prepared by <b>Fedi Souihi</b> · TekUp University — Security Robot Project<br>
+    POC target: personal laptop (verified) &nbsp;→&nbsp; Deployment target: NVIDIA Jetson Orin Nano 8GB
+  </div>
+  <table class="doc-control">
+    <tr><td class="k">Document</td><td>Security Robot — Architecture Analysis & Roadmap (pre-code deliverable)</td></tr>
+    <tr><td class="k">Version / Status</td><td>1.2 — v1.1 revisions + scope decision (see below)</td></tr>
+    <tr><td class="k">Scope decision</td><td>English-only interaction for the POC. Multi-language switching (Arabic / French / Derja) is explicitly out of scope per project decision 2026-09-19 — too unreliable to implement well. Contracts keep a language field so a language can be added later by configuration; Derja is permanently out of scope for this architecture class.</td></tr>
+    <tr><td class="k">Date</td><td>2026-09-19</td></tr>
+    <tr><td class="k">Primary input</td><td>TestExecutionReport_updated2.csv (manual test campaign, MSBOT-141…345)</td></tr>
+    <tr><td class="k">Design rule</td><td>Every capability is a swappable service behind configuration — features are added and removed without rewrites.</td></tr>
+  </table>
+  <div class="toc">
+    <div>1. Executive summary</div>
+    <div>2. Inputs — findings from the test report</div>
+    <div>3. Target hardware</div>
+    <div>4. Resource budget & governor policy</div>
+    <div>5. Technology selections & rationale</div>
+    <div>6. System architecture</div>
+    <div>7. Unified detection design</div>
+    <div>8. Sessions & personalized memory</div>
+    <div>9. Observability &amp; logging from day one</div>
+    <div>10. Test-first engineering</div>
+    <div>11. Guardrails &amp; robustness</div>
+    <div>12. Repository layout &amp; modularity rules</div>
+    <div>13. Phases 0–7 with exit criteria</div>
+    <div>14. Defect → feature → phase map</div>
+    <div>15. Assumptions, limitations, risks</div>
+  </div>
+</div>
+
+<!-- ============ 1 ============ -->
+<div class="section">
+<h1>1. Executive summary</h1>
+<p>The current ARIA robot performs well in its happy path — a single known visitor approaches, is recognized in under 2 seconds, and holds a short cloud-LLM conversation. The manual test campaign, however, shows the design is fragile everywhere else: single-human and group detection are <b>two separate code paths</b> (evaluated once per session, not continuously), identity is never re-verified (so a fast visitor swap inherits the previous person's context), departure is a fixed 20-second face-visibility timer, end-of-utterance is a hard-coded pause timeout, cross-session memory does not recall past topics, a camera crash requires restarting the whole application, and the cloud backend is trivially prompt-injectable.</p>
+<p>This roadmap replaces that architecture with a <b>single dynamic perception pipeline</b> in which zero, one, or many people are handled by the same code path — "group mode" stops existing as a mode and becomes emergent scene state — and wraps it in a service-oriented runtime where <b>sessions, identity, and memory are robust first-class concepts</b>. Every capability (detector, tracker, recognizer, STT, TTS, LLM, memory) lives behind an interface registered in a plugin registry, so improvements are config changes, not rewrites, and features can be removed just as easily as they are added.</p>
+<p><b>Proof-of-concept target (verified on this machine):</b> ASUS Vivobook 16 — Intel Core&nbsp;5&nbsp;210H (8C/12T), NVIDIA RTX&nbsp;4050 Laptop (6&nbsp;GB VRAM), 16&nbsp;GB RAM, Windows&nbsp;11. <b>Deployment target:</b> Jetson Orin Nano 8&nbsp;GB under JetPack&nbsp;6.x. All model and memory budgets are chosen to fit both platforms; the Resource Governor enforces them at runtime.</p>
+<p><b>Deliverable order:</b> documents first (this report, plus the repository-level ARCHITECTURE.md), then implementation phases 0–7, each ending in a demo-able, testable state. The phase ordering is feature-gated, not date-gated.</p>
+
+<h2>Success criteria</h2>
+<ul>
+  <li><b>One code path:</b> 0/1/N people produce identical behavior contracts; no mode flags exist anywhere in the code.</li>
+  <li><b>Continuous identity:</b> a session is bound to a verified person-track and re-checked periodically; a fast A→B handoff can never transfer A's context to B (fixes NFR-07 Step 4, NFR-01 Step 3).</li>
+  <li><b>Working recall:</b> a returning visitor is greeted with their last open topic — "Did you find the library last time?" (fixes FUNC-10 Steps 1–2).</li>
+  <li><b>Natural audio:</b> adaptive end-of-utterance replaces the hard-coded pause timeout; non-directed noise and overheard speech are gated out (fixes FUNC-14 Steps 8, 11, 12).</li>
+  <li><b>Resource discipline:</b> everything fits the laptop budget; memory returns to idle baseline after sessions (fixes NFR-05 residue).</li>
+  <li><b>Self-healing:</b> no camera/mic failure requires restarting the application (fixes NFR-03 Step 6); camera tampering is detected (fixes FUNC-05 Step 13).</li>
+  <li><b>Hardened conversation:</b> system prompt extraction is mitigated by a no-secrets design plus input/output screening (fixes NFR-06).</li>
+  <li><b>Built on telemetry (new requirement):</b> structured logging and the event timeline exist from Phase 0 — any malfunction must be reproducible from the robot's own logs (§9).</li>
+  <li><b>Built on tests (new requirement):</b> contract tests, hermetic fakes, and deterministic fixture replays from the first commit, so features that misbehave later are reproduced and isolated in minutes (§10).</li>
+</ul>
+</div>
+
+<!-- ============ 2 ============ -->
+<div class="section">
+<h1>2. Inputs — findings from the test report</h1>
+<p>The manual campaign (<code>TestExecutionReport_updated2.csv</code>) is the empirical foundation of this prototype. Each finding below is treated as a requirement, not a bug ticket.</p>
+<table>
+  <tr><th style="width:11%">Ref</th><th style="width:15%">Area</th><th style="width:38%">Finding (as tested)</th><th style="width:36%">Prototype response</th></tr>
+  <tr><td>FUNC-14 S8, S10</td><td>End of utterance</td><td>Pause detection is a hard-coded timeout; natural mid-sentence pauses trigger premature responses.</td><td>VAD segmentation + semantic end-of-turn detection (Smart Turn, Arabic/French included) with threshold fallback (§5.1, Phase 2).</td></tr>
+  <tr><td>FUNC-14 S11–12</td><td>Noise / directionality</td><td>Loud non-speech noise can be transcribed; any heard speech is treated as directed at the robot.</td><td>VAD + engagement gating + voice-print check against the engaged identity (Phase 2).</td></tr>
+  <tr><td>FUNC-10 S1–2</td><td>Cross-session memory</td><td>Same-day and next-day topic recall not functional.</td><td>MemoryCard extraction on session close + recall composer on re-engagement (Phase 4).</td></tr>
+  <tr><td>FUNC-07 S6–7, S13</td><td>Multilingual / diarization</td><td>Language detection resets per utterance and misfires on short input; no mid-sentence AR↔FR code-switching; overlapping speakers merged into one transcription.</td><td><b>Out of scope</b> (project decision): English-only POC; no language detection/switching. The language field stays in contracts for a later config-only addition. Overlap (S13) keeps the one-at-a-time prompt (Phase 2).</td></tr>
+  <tr><td>FUNC-06 S2, S8–9</td><td>Face recognition</td><td>False-positive match of an unregistered tester; printed-photo and on-screen spoofs both accepted.</td><td>Multi-frame identity voting with margin; passive anti-spoofing as a Phase 7 research item.</td></tr>
+  <tr><td>FUNC-05 S3–4, S8, S13</td><td>Face detection</td><td>Full profile and downward gaze fail (gaze-down reads as "user left"); masks defeat detection; no camera-tamper awareness.</td><td>Track-based presence (person body, not face-only) + frame-statistics tamper detector (Phase 1).</td></tr>
+  <tr><td>NFR-01 S3</td><td>Identity handoff</td><td>No ID-locking: a second person entering during an active session inherits the first person's identity; timer resets only on face visibility.</td><td>Session bound to a track identity, re-verified on an interval; departure is multimodal (Phase 1/3).</td></tr>
+  <tr><td>NFR-03 S2, S6</td><td>Peripheral failure</td><td>Camera module crash needs a full restart of <code>main.py</code>; reconnecting hardware is not detected.</td><td>Per-service watchdog + device monitor with hot reconnect (Phase 5).</td></tr>
+  <tr><td>NFR-05 S1–3</td><td>Resource hygiene</td><td>~800 MB idle, 910 MB during interaction; +300–400 MB never reclaimed after sessions.</td><td>Bounded queues, session teardown, Resource Governor, soak-test gate (Phase 0/5).</td></tr>
+  <tr><td>NFR-06 S2–5</td><td>Prompt injection</td><td>Direct injection, DAN roleplay, and translation-framed extraction all succeed against the cloud backend.</td><td>No-secrets prompt design, instruction hierarchy, input/output screening (Phase 3).</td></tr>
+  <tr><td>NFR-07 S1, S4</td><td>Data exposure</td><td>Sensitive-ID masking has trigger edge cases; context theft via session swap succeeds.</td><td>Masking at the policy layer with regression tests; identity re-verification closes the swap hole (Phase 1/3/4).</td></tr>
+  <tr><td>FUNC-11 (all)</td><td>Group interaction</td><td>Group behavior untested — by design the system has no group awareness.</td><td>SceneManager + AttentionPolicy make multi-person handling a first-class state (Phase 1/3).</td></tr>
+  <tr><td>FUNC-04 (all)</td><td>LiDAR presence</td><td>Blocked / untested.</td><td>Camera-based presence for the POC; LiDAR re-enters later as a pluggable sensor service (Phase 7).</td></tr>
+</table>
+</div>
+
+<!-- ============ 3 ============ -->
+<div class="section">
+<h1>3. Target hardware</h1>
+<h2>3.1 POC platform — verified on this machine</h2>
+<table>
+  <tr><th style="width:28%">Component</th><th style="width:42%">Detail</th><th style="width:30%">Design implication</th></tr>
+  <tr><td>Machine</td><td>ASUS Vivobook 16 V3607VU</td><td>Consumer laptop; thermal headroom adequate for short inference bursts.</td></tr>
+  <tr><td>CPU</td><td>Intel Core 5 210H — 8 cores / 12 threads @ 2.2 GHz base</td><td>Enough threads to offload STT or TTS to CPU when VRAM is tight.</td></tr>
+  <tr><td>GPU</td><td>NVIDIA GeForce RTX 4050 Laptop — 6 GB VRAM</td><td><b>Binding constraint.</b> Every model budget sized against ~6 GB with OS headroom.</td></tr>
+  <tr><td>RAM</td><td>16 GB</td><td>Comfortable for the full service stack plus OS.</td></tr>
+  <tr><td>OS</td><td>Windows 11 Home, 64-bit</td><td>Native Windows stack (no WSL requirement); Edge available for tooling.</td></tr>
+</table>
+<h2>3.2 Deployment platform — Jetson Orin Nano 8 GB</h2>
+<table>
+  <tr><th style="width:28%">Component</th><th style="width:72%">Detail</th></tr>
+  <tr><td>Compute</td><td>1024-core Ampere GPU (32 Tensor cores) + 6× Cortex-A78AE; up to 40 TOPS (sparse INT8).</td></tr>
+  <tr><td>Memory</td><td><b>8 GB LPDDR5, unified</b> — CPU and GPU share one pool; every "VRAM" byte is taken from the same 8 GB the OS needs.</td></tr>
+  <tr><td>Software</td><td>JetPack 6.x (CUDA, TensorRT, ONNX-Runtime path); models exported to TensorRT INT8 in Phase 7.</td></tr>
+</table>
+<p><b>Implication.</b> The laptop's split budgets (6 GB VRAM + 16 GB RAM) are strictly more forgiving than the Orin's single 8 GB pool, so anything that fits the budget table in §4 will also fit the Orin with the same architecture — only the model format (TensorRT engines) and TTS/LLM defaults change per profile.</p>
+</div>
+
+<!-- ============ 4 ============ -->
+<div class="section">
+<h1>4. Resource budget & governor policy</h1>
+<h2>4.1 Model budget (POC laptop)</h2>
+<table>
+  <tr><th style="width:22%">Component</th><th style="width:30%">Selection</th><th style="width:14%">Budget</th><th style="width:34%">Notes</th></tr>
+  <tr><td>Person detection</td><td>YOLO26n @ 640 (person class only)</td><td>~0.5 GB VRAM</td><td>Jan-2026 edge-first family: NMS-free end-to-end head, +0.6–0.8 mAP over the YOLO11 class; pose variant available for future facing-estimation.</td></tr>
+  <tr><td>Face detection</td><td>SCRFD-500M (alt: OpenCV YuNet)</td><td>~0.1 GB</td><td>Native multi-face in one pass.</td></tr>
+  <tr><td>Face embedding</td><td>ArcFace r50 (InsightFace <code>buffalo_l</code>)</td><td>~0.3 GB</td><td>512-d vectors; runs per-track, not per-frame.</td></tr>
+  <tr><td>VAD + turn detection</td><td>Silero VAD v5 + Smart Turn v3.2 (ONNX)</td><td>~0.1 GB</td><td>Silero (~2 MB) streams continuously; Smart Turn (8 MB int8, CPU) runs only during silence to decide end-of-turn.</td></tr>
+  <tr><td>STT</td><td>faster-whisper <code>large-v3-turbo</code> int8_float16 (CTranslate2)</td><td>~1.2 GB (or CPU)</td><td>Near-large-v3 accuracy at turbo cost; <code>small</code> stays as the CPU / tight-VRAM fallback (12 threads available).</td></tr>
+  <tr><td>LLM (local fallback)</td><td>Qwen3-4B-Instruct-2507 Q4 via Ollama</td><td>~2.5 GB on demand</td><td>GPT-4.1-nano-class benchmarks, strong multilingual; loaded only when cloud is unavailable/timeout.</td></tr>
+  <tr><td>LLM (default)</td><td>Cloud completion API</td><td>0 VRAM</td><td>Parity with current robot's backend class.</td></tr>
+  <tr><td>TTS</td><td>Piper1-GPL (CPU) · Kokoro-82M (EN/FR) · edge-tts (cloud)</td><td>0 VRAM</td><td>CPU-only or network; never competes for VRAM; Kokoro adds near-studio EN/FR offline quality.</td></tr>
+  <tr><td colspan="2"><b>Total steady-state (cloud LLM)</b></td><td><b>~2.2 GB</b></td><td>Headroom for session telemetry, overlay, and spikes.</td></tr>
+  <tr><td colspan="2"><b>Peak (local LLM active)</b></td><td><b>~4.4 GB</b></td><td>Inside 6 GB with OS headroom; STT demotes to CPU under VRAM pressure (§4.2).</td></tr>
+</table>
+<h2>4.2 Governor policies (enforced at runtime from Phase 0)</h2>
+<ul>
+  <li><b>Camera pacing:</b> 15 fps while the scene is active (tracks present / session open), 2 fps idle; resolution 1280→640 downscale under pressure. Detection cost tracks scene activity, not wall-clock.</li>
+  <li><b>Placement:</b> STT runs on GPU by default and is demoted to CPU when VRAM pressure crosses a threshold; local LLM loads only on demand and unloads after a cooldown.</li>
+  <li><b>Backpressure:</b> all queues are bounded; under overload the governor drops <i>frames</i>, never audio, and never blocks the audio thread behind vision work.</li>
+  <li><b>Teardown:</b> on session close, per-session objects, caches, and queue buffers are released; a soak test (Phase 5) asserts RSS returns to within ~10% of the idle baseline — the direct answer to NFR-05's +300–400 MB residue.</li>
+</ul>
+</div>
+
+<!-- ============ 5 ============ -->
+<div class="section">
+<h1>5. Technology selections & rationale</h1>
+<p>Every selection sits behind a domain interface, so an alternative is a configuration change rather than a rewrite. "Research spike" items are deliberately scheduled, not hand-waved.</p>
+<table>
+  <tr><th style="width:14%">Domain</th><th style="width:24%">Selection</th><th style="width:34%">Why</th><th style="width:28%">Alternatives (swap path)</th></tr>
+  <tr><td>Detection + tracking</td><td>Ultralytics <b>YOLO26n</b> + ByteTrack</td><td>Current-generation (Jan 2026) edge-first family: native NMS-free end-to-end inference, lighter head (no DFL), ~43% faster CPU inference than the YOLO11 class at equal-or-better mAP; a pose variant exists for future facing/engagement estimation. ByteTrack stays the fastest solid baseline and tracker choice is a YAML file, not code.</td><td>BoT-SORT (camera-motion comp, optional ReID), OC-SORT, Deep OC-SORT, TrackTrack (new Ultralytics default) — all drop-in config alternates. Phase 1 spike benchmarks on recorded fixtures. YOLO11n remains a fallback weight.</td></tr>
+  <tr><td>Face pipeline</td><td>InsightFace <code>buffalo_l</code>: SCRFD detector + ArcFace r50 (512-d)</td><td>Multi-face detection in one pass; strong embeddings; per-track gallery + multi-frame voting closes the false-positive class seen in testing.</td><td>OpenCV YuNet + ONNX ArcFace (smaller footprint); FaceNet (legacy).</td></tr>
+  <tr><td>VAD / EOU</td><td>Silero VAD v5 + <b>Smart Turn v3.2</b></td><td>Silero (~2 MB) segments speech robustly; Smart Turn (pipecat-ai, BSD-2, Whisper-Tiny backbone, 8 MB int8) then decides <i>semantically</i> whether the turn is complete — 23 languages including Arabic and French, ~10–100 ms on CPU, audio-native (uses prosody, not just text).</td><td>WebRTC VAD (lighter, less robust); plain threshold mode as degenerate config fallback; LLM-assisted endpointing as a later upgrade.</td></tr>
+  <tr><td>STT</td><td>faster-whisper <code>large-v3-turbo</code> int8_float16</td><td>Large-v3-class accuracy at turbo cost (~8× less compute than large-v3); officially supported in faster-whisper with batched inference and a built-in Silero VAD filter. English-first per scope decision — the model stays multilingual, so a language could be added later by config.</td><td><code>small</code> int8 as the CPU / tight-VRAM fallback; whisper.cpp (Vulkan); UFAL <code>whisper_streaming</code> as an optional continuous-streaming policy layer.</td></tr>
+  <tr><td>Voice-print</td><td>SpeechBrain ECAPA-TDNN x-vectors</td><td>Cheap speaker embedding used to gate "is this speech from the engaged person?" and reject overheard speech; groundwork for diarization.</td><td>pyannote embeddings (heavier); simple energy heuristics as degenerate mode.</td></tr>
+  <tr><td>TTS</td><td><code>TTSBackend</code>: edge-tts (cloud, default) · Kokoro-82M (offline EN) · Piper1-GPL (offline, multilingual capability)</td><td>English-first per scope decision: edge-tts for the laptop demo; Kokoro-82M (Apache, 82M params) as the strongest offline English voice. Piper1-GPL ships French/Arabic voices (<code>fr_FR</code>, <code>ar_JO-kareem</code>) — capability retained behind the same interface, not wired into the POC.</td><td>XTTS rejected (license/weight). Adding a backend or voice = one class + config entry.</td></tr>
+  <tr><td>LLM</td><td><code>ChatProvider</code>: cloud API (default) + Ollama <b>Qwen3-4B-Instruct-2507</b> Q4 (fallback)</td><td>Cloud keeps parity with the current robot's quality; the local fallback is a 4B Apache model that matches GPT-4.1-nano on public benchmarks with strong multilingual scores (incl. Arabic) and 256K context — a class above the Qwen2.5-3B originally shortlisted.</td><td>Qwen3-1.7B/0.6B for guardrail classification or tighter budgets; larger cloud tiers by config.</td></tr>
+  <tr><td>Memory</td><td>SQLite (WAL) + optional sqlite-vec</td><td>Zero-service dependency, file-portable, Jetson-friendly; vector index is an optional layer, not a service.</td><td>ChromaDB/FAISS only if semantic recall demands it later.</td></tr>
+  <tr><td>Runtime</td><td>Python 3.11, asyncio, OpenCV, onnxruntime-gpu, psutil+NVML</td><td>Single-language stack with CUDA access on Windows and Jetson alike.</td><td>TensorRT/DeepStream integration is a Phase 7 optimization, not a re-architecture.</td></tr>
+</table>
+
+<h3>5.1 End-of-turn detection, three tiers (replaces the hard-coded timeout)</h3>
+<ul>
+<li><b>Tier 1 — VAD (always on):</b> Silero VAD v5 streams at 16 kHz and segments speech; non-speech events (doors, coughs, footsteps) never open a turn in the first place (FUNC-14 Step 11).</li>
+<li><b>Tier 2 — semantic turn decision (default):</b> when VAD reports silence, the buffered turn audio (≤8 s, trailing-aligned) is scored by <b>Smart Turn v3.2</b> — an open-source, 8 MB int8 CPU model (Whisper-Tiny backbone) purpose-built for "should the agent respond yet?". It distinguishes "I'm looking for… the library" (pause, keep listening) from "…the library." (complete) — the exact FUNC-14 Step 8 failure case — using prosody, not just timing, in 23 languages including Arabic and French.</li>
+<li><b>Tier 3 — fallback:</b> if Smart Turn is disabled or unavailable, a configurable silence threshold (default 600 ms) takes over, so behavior never drops below today's baseline. A max-utterance cap (default 20 s) prevents runaway capture (preserves the Step 10 behavior the tests liked).</li>
+</ul>
+<h3>5.2 Language scope — English-only by decision</h3>
+<p>Per the project decision of 2026-09-19, multi-language interaction — Arabic, French, and especially Derja — is <b>out of scope</b> for the POC: too unreliable to implement well on this hardware class, and a half-working version is worse than none. The robot interacts in English only; there is no language detection, no session-language prior, no switching logic. Nothing about the architecture forecloses the alternative: Whisper and the LLM remain language-agnostic, and every data contract (<code>Utterance</code>, <code>Session</code>) carries a language field — adding French or Arabic later is a configuration matter (STT model, TTS voices, prompt), not a redesign. Derja specifically is documented as permanently out of scope for this architecture class.</p>
+<h3>5.3 Identity voting (fixes the false-positive match)</h3>
+<p>A face match is only <i>provisional</i> until the same embedding wins with margin over the runner-up across ≥N frames (default 3) within a track. The track accumulates an embedding gallery with an EMA centroid, so brief pose/lighting variation does not poison identity. Enrollment is a small tool that captures a gallery per person.</p>
+<h3>5.4 LLM fallback router</h3>
+<p>Cloud calls are wrapped with a timeout; on timeout or network loss the router loads the local <b>Qwen3-4B-Instruct-2507</b> (~2.5 GB Q4; first call pays a load latency, later calls are fast; unloads after a cooldown), answers with a localized "offline mode" notice if needed, and retries cloud afterwards. Guardrail classification can share the runtime with a Qwen3-0.6B/1.7B tier if heuristic screening proves insufficient. This upgrades NFR-03 Step 4 from "technical difficulties" to graceful degradation.</p>
+</div>
+
+<!-- ============ 6 ============ -->
+<div class="section">
+<h1>6. System architecture</h1>
+<pre>┌────────────────────────────────────────────────────────────────┐
+│                        App Shell (main)                        │
+│   Config profiles (laptop.yaml / jetson.yaml) · PluginRegistry │
+└────────────────────────────────────────────────────────────────┘
+        │ EventBus (typed pub/sub, bounded queues)   │ Watchdog
+┌───────┴────────┐  ┌──────────────┐  ┌───────────────┴────────┐
+│ PERCEPTION     │  │ COGNITION    │  │ EXPRESSION             │
+│ CameraService  │  │ DialogueMgr  │  │ TTSBackend(s)          │
+│ PersonDetector │  │ (session FSM)│  │ (streaming, barge-in)  │
+│ Tracker        │→ │ AttentionPol │→ │ DisplayService         │
+│ FacePipeline   │  │ Guardrails   │  │ (debug UI / output)    │
+│ SceneManager   │  │ ChatProvider │  └────────────────────────┘
+│ AudioService   │  └──────┬───────┘
+│ (VAD/STT/LID)  │         │
+└───────┬────────┘  ┌──────┴────────┐   ┌───────────────────────┐
+        └──────────→│ PERSISTENCE   │   │ SUPERVISION           │
+                    │ ProfileStore  │   │ Watchdog · DeviceMon  │
+                    │ SessionStore  │   │ ResourceGovernor      │
+                    │ MemoryCards   │   │ HealthMonitor         │
+                    └───────────────┘   └───────────────────────┘</pre>
+
+<h2>6.1 Core primitives (built once in Phase 0, used by everything)</h2>
+<table>
+  <tr><th style="width:22%">Primitive</th><th style="width:78%">Responsibility</th></tr>
+  <tr><td><code>EventBus</code></td><td>Typed publish/subscribe (<code>TrackAppeared</code>, <code>TrackLost</code>, <code>FaceMatched</code>, <code>UtteranceHeard</code>, <code>TamperDetected</code>, <code>DeviceLost</code>/<code>DeviceRestored</code>, <code>SessionOpened/Closed</code>, …) with bounded queues and an explicit backpressure policy. Consumers and publishers never import each other.</td></tr>
+  <tr><td><code>Service</code></td><td>Base class: lifecycle (<code>init/start/stop/health</code>), heartbeat, declared config schema, declared events produced/consumed. Every feature is one of these.</td></tr>
+  <tr><td><code>PluginRegistry</code></td><td>Discovers and instantiates services from YAML config; enabling/disabling/replacing a capability never touches code outside that capability.</td></tr>
+  <tr><td><code>Watchdog</code></td><td>Supervises heartbeats; restarts a crashed service (e.g., the camera module) without restarting the application.</td></tr>
+  <tr><td><code>ResourceGovernor</code></td><td>Watches VRAM/RAM/CPU; applies pacing/placement policy (§4.2); owns teardown semantics.</td></tr>
+  <tr><td><code>DeviceMonitor</code></td><td>Watches camera/mic enumeration; publishes device events; services react with hot reconnect.</td></tr>
+</table>
+<h2>6.2 Data contracts</h2>
+<table>
+  <tr><th style="width:22%">Contract</th><th style="width:78%">Key fields</th></tr>
+  <tr><td><code>Track</code></td><td>id, bbox, velocity, engagement state, age, last-seen.</td></tr>
+  <tr><td><code>PersonIdentity</code></td><td>embedding centroid + gallery, profile ref, name (if enrolled), confidence, verification timestamp.</td></tr>
+  <tr><td><code>Utterance</code></td><td>text, language, confidence, voice-print ref, start/end timestamps, gating verdict.</td></tr>
+  <tr><td><code>Session</code></td><td>bound identity, FSM state, history ref, opened/closed timestamps, language.</td></tr>
+  <tr><td><code>MemoryCard</code></td><td>topic, summary, status (open/resolved), created/last-touched timestamps, profile ref.</td></tr>
+</table>
+</div>
+
+<!-- ============ 7 ============ -->
+<div class="section">
+<h1>7. Unified detection design</h1>
+<p>This is the direct answer to the project's core problem: two fragile code paths (single vs group) with one-shot evaluation. The prototype has <b>one</b> pipeline; mode distinctions do not exist.</p>
+<table>
+  <tr><th style="width:5%">#</th><th style="width:30%">Design decision</th><th style="width:65%">Mechanism</th></tr>
+  <tr><td>1</td><td>Sense once, decide continuously</td><td>Every frame → person detection → tracker → N persistent <code>Track</code>s. The scene is re-evaluated every cycle, not once per session. A "session" is simply a relationship between the robot and engaged tracks.</td></tr>
+  <tr><td>2</td><td>Per-track state machine</td><td><code>PRESENCE → NEAR → ENGAGED → DEPARTED</code>, driven by proximity, dwell time, facing/pose, and speech. Replaces the single-person trigger assumption; camera-based presence covers the LiDAR role for the POC.</td></tr>
+  <tr><td>3</td><td>Identity binding with ID-lock</td><td>Face pipeline runs per track (not per frame): detect → embed → gallery vote → <code>PersonIdentity</code>. Once bound, the session is <b>locked</b> to that identity.</td></tr>
+  <tr><td>4</td><td>Continuous re-verification</td><td>The bound face is re-verified every N seconds (default 5, configurable) and on suspicion triggers (bbox jump, a new face overlapping the engaged track). If the bound face is gone while a different face occupies the track → session freezes and re-authenticates; context never transfers (closes the NFR-07 Step 4 theft path).</td></tr>
+  <tr><td>5</td><td>Multimodal departure</td><td>Departure requires face-loss <b>and</b> no voice activity <b>and</b> no recent interaction; any activity resets the absence timer. Replaces the fixed 20 s face-only timer (NFR-01 Step 3) and the "look down = left" failure (FUNC-05 Step 4).</td></tr>
+  <tr><td>6</td><td>Group awareness by policy</td><td><code>SceneManager</code> publishes present/near/engaged people; the Dialogue Manager's <b>AttentionPolicy</b> selects the addressee (configurable: nearest-facing, most-recent-speaker, first-arriver), acknowledges bystanders, and treats A→B handoff as a first-class transition (FUNC-11).</td></tr>
+  <tr><td>7</td><td>Tamper & failure awareness</td><td>Frame-statistics detector (uniformity/blur/blackout) publishes <code>TamperDetected</code> (FUNC-05 Step 13); <code>DeviceMonitor</code> events drive hot reconnect (NFR-03 Step 6).</td></tr>
+</table>
+<div class="note"><b>Acceptance invariant:</b> for any N = 0, 1, 2, … people in frame, the perception layer emits the same event vocabulary and the same per-track state machine applies. Tests assert behavioral parity rather than separate single/group test suites — the defect class "two code paths diverge" becomes structurally impossible.</div>
+</div>
+
+<!-- ============ 8 ============ -->
+<div class="section">
+<h1>8. Sessions & personalized memory</h1>
+<h2>8.1 Lifecycle</h2>
+<ul>
+  <li><b>Open:</b> a track reaches <code>ENGAGED</code> and identity is bound → <code>SessionOpened</code>. Greeting is composed from the profile (name if enrolled; recall content if any).</li>
+  <li><b>During:</b> raw turns kept in a bounded FIFO (default 6, configurable) <i>plus</i> a running LLM-compressed summary — context survives beyond the FIFO limit, an explicit improvement over the current 5-exchange ceiling.</li>
+  <li><b>Close:</b> departure confirmed (multimodal, §7) or farewell → the LLM extracts <b>MemoryCards</b> from the conversation: topic, short summary, open/resolved status. Cards are appended to the profile.</li>
+  <li><b>Re-engage:</b> the RecallComposer injects the most recent and any <i>unresolved</i> cards into the greeting context → "Did you find the library last time?" (fixes FUNC-10 Steps 1–2 for same-day and next-day gaps alike, since cards are timestamped).</li>
+</ul>
+<h2>8.2 Profile model</h2>
+<table>
+  <tr><th style="width:24%">Field group</th><th style="width:76%">Contents</th></tr>
+  <tr><td>Identity</td><td>Face embedding centroid + recent gallery, enrolled name (if any), temporary flag for strangers.</td></tr>
+  <tr><td>History</td><td>Session list with timestamps, MemoryCards, topics discussed.</td></tr>
+  <tr><td>Preferences</td><td>Language, voice preference, opt-out flags.</td></tr>
+  <tr><td>Biometrics-adjacent</td><td>Voice-print reference (for gating only), last-seen.</td></tr>
+</table>
+<h2>8.3 Privacy & retention</h2>
+<ul>
+  <li>Sensitive-ID masking is applied at the <b>policy layer</b> — a regex + context filter over both TTS text and display output — with regression tests covering the trigger edge cases found in NFR-07 Step 1.</li>
+  <li>Session data is wiped on <i>confirmed departure</i>, not only when a replacement session starts — closing the lingering-context gap in NFR-07/FUNC-10.</li>
+  <li>Strangers' temporary profiles auto-expire (default 30 days); any profile can be deleted on request; raw audio is never persisted beyond the active utterance.</li>
+</ul>
+</div>
+
+<!-- ============ 9 ============ -->
+<div class="section">
+<h1>9. Observability &amp; logging from day one</h1>
+<p>Logging is a Phase-0 deliverable, not a retro-fit. The governing rule: <b>any malfunction observed at the robot must be reproducible from its own telemetry</b> — logs plus the event timeline — without re-running the scenario. Four layers:</p>
+<table>
+  <tr><th style="width:20%">Layer</th><th style="width:42%">What it captures</th><th style="width:38%">How it is used</th></tr>
+  <tr><td><b>Structured logs</b></td><td>One logger per service; every line is JSON carrying <code>ts, level, service, event, session_id, track_id, utterance_id</code> bound automatically as context. Pretty human-readable console mode for development.</td><td>Failures in <code>aria.audio.stt</code> are greppable without reading vision noise; log levels are set per module from config; every state transition that matters logs one line explaining <i>why</i>.</td></tr>
+  <tr><td><b>Event timeline ("flight recorder")</b></td><td>The EventBus taps every event into a JSONL timeline; an in-memory ring buffer of the last ~5 minutes is auto-dumped to disk on anomalies (service crash, watchdog restart, governor throttling, tamper detection).</td><td>Post-incident reconstruction: load the timeline with <code>tools/timeline_view.py</code> and see exactly what perception saw, what the dialogue decided, and when — no re-staging of people or hardware.</td></tr>
+  <tr><td><b>Metrics</b></td><td>Counters and histograms: frame rate, detection latency, track churn, end-of-turn decision latency, STT real-time factor, TTS synthesis latency, LLM time-to-first-token, VRAM/RAM.</td><td>Drives the Phase 6 dashboard and the budget assertions (§4); every governor decision is logged together with the metric value that triggered it.</td></tr>
+  <tr><td><b>Privacy in telemetry</b></td><td>The same masking policy layer (§8.3) applies to logs and the timeline; IDs and names are redacted by the shared filter; raw audio/video never touches disk except in explicitly recorded fixtures.</td><td>Debuggability without creating a new data-leak channel — consistent with the NFR-07 posture.</td></tr>
+</table>
+<div class="note"><b>Phase-0 rule of thumb baked into code:</b> every governance decision and state transition (session open/close, identity re-verification, language switch, device loss, fallback activation) emits exactly one log line that, read alone, explains the decision — inputs, thresholds, chosen value.</div>
+</div>
+
+<!-- ============ 10 ============ -->
+<div class="section">
+<h1>10. Test-first engineering</h1>
+<p>The same event-bus boundaries that keep features swappable also make them individually testable. The rule enforced from the first commit: <b>no feature is merged without a test that fails without it.</b> Testing is how the robot stays debuggable months later — when something malfunctions on site, the workflow below reproduces it deterministically.</p>
+<table>
+  <tr><th style="width:20%">Test type</th><th style="width:44%">Mechanism</th><th style="width:36%">What it protects</th></tr>
+  <tr><td><b>Contract tests</b> (per service)</td><td>Each interface (<code>Detector</code>, <code>Tracker</code>, <code>FaceRecognizer</code>, <code>STT</code>, <code>TTSBackend</code>, <code>ChatProvider</code>, <code>MemoryStore</code>) has a contract suite; real and fake implementations must pass the same suite.</td><td>Swapping a backend cannot silently change behavior; a malfunctioning feature is isolated to one implementation in one step.</td></tr>
+  <tr><td><b>Fixture replays</b></td><td><code>tools/record_fixture.py</code> records real camera+mic sessions once (single visitor, group, A→B handoff, occlusion, gaze-down, noisy room); <code>tools/replay.py</code> feeds them deterministically through the pipeline.</td><td>Full-stack scenarios are reproducible without hardware, people, or cloud — the substrate for debugging future regressions.</td></tr>
+  <tr><td><b>Scenario tests</b> (CSV-derived)</td><td>Each mapped defect row (§14) becomes an expected event sequence over a fixture — e.g., "mid-sentence pause → no response attempt until Smart Turn says complete".</td><td>The original manual test campaign becomes an executable acceptance suite; old failures resurface automatically if regressed.</td></tr>
+  <tr><td><b>Hermetic fakes</b></td><td><code>FakeCamera</code>, <code>FakeMic</code>, <code>FakeLLM</code> (scripted replies + canned latencies), <code>FakeTTS</code>; a "test" config profile wires every source to a fake so the whole stack runs headless.</td><td>Dialogue FSM, attention policy, memory, and guardrails are unit-testable in isolation with zero network or GPU.</td></tr>
+  <tr><td><b>Golden files</b></td><td>Transcripts, identity-vote outcomes, and MemoryCard extractions are pinned to golden files with explicit tolerance flags where nondeterminism is legitimate.</td><td>Model upgrades show a reviewable behavioral diff instead of surprising users.</td></tr>
+  <tr><td><b>Benchmarks-as-tests</b></td><td><code>bench_vision</code>/<code>bench_audio</code> assert the budget thresholds of §4; a soak test asserts RSS recovery (NFR-05).</td><td>Resource discipline is enforced in CI-lite, not hoped for.</td></tr>
+</table>
+<h3>Debug workflow for future malfunctions</h3>
+<p>Reproduce (fixture replay or auto-dumped timeline) → isolate (per-service contract tests narrow it to one implementation) → fix → the scenario joins the permanent regression suite. Because the failure path is replayable, "it works differently now" disagreements end with evidence, not opinion.</p>
+</div>
+
+<!-- ============ 11 ============ -->
+<div class="section">
+<h1>11. Guardrails &amp; robustness</h1>
+<h2>11.1 Prompt-injection defense (NFR-06)</h2>
+<p>The test campaign showed the cloud backend fully extractable via direct, roleplay, and translation-framed attacks. The prototype assumes cloud models cannot be fully trusted and applies defense-in-depth:</p>
+<ul>
+  <li><b>No secrets in the prompt:</b> behavioral rules are enforced in code (policy layer), so a successful extraction yields nothing critical.</li>
+  <li><b>Input screening:</b> heuristic classifier for injection patterns (instruction-override phrasing, role-reset framing, encoded/translation-framed extraction) flags or rewrites before the LLM sees the text.</li>
+  <li><b>Instruction hierarchy + canary:</b> system prompt includes layered instructions and a canary token; the output filter drops responses containing the canary or policy keywords.</li>
+  <li><b>Zero agency:</b> no tool, file, or network access from the model — the attack surface stays in-context only, by construction.</li>
+</ul>
+<h2>11.2 Operational robustness</h2>
+<ul>
+  <li><b>Watchdog self-heal:</b> a crashed camera service is restarted in place; the application keeps running (direct fix for NFR-03 Step 6's "full restart of main.py").</li>
+  <li><b>Hot device reconnect:</b> <code>DeviceMonitor</code> detects camera/mic re-enumeration and the affected service rebinds without restart.</li>
+  <li><b>Degradation modes:</b> vision-only (mic lost), audio-only (camera lost/tampered), offline-brain (network lost → local LLM). The robot states which mode it is in, on-screen and aloud.</li>
+  <li><b>Memory hygiene:</b> bounded queues + teardown + governor (§4.2); a 60-minute mixed-use soak test with RSS-recovery assertion gates Phase 5.</li>
+  <li><b>Startup correctness:</b> audio devices are selected by config identity (name match with fallback), removing the post-reboot "change audio in/out" manual step seen in NFR-04 Step 1.</li>
+</ul>
+</div>
+
+<!-- ============ 12 ============ -->
+<div class="section">
+<h1>12. Repository layout &amp; modularity rules</h1>
+<pre>aria-poc/
+  ROADMAP.md · ARCHITECTURE.md · README.md
+  configs/
+    laptop.yaml · jetson.yaml · features/*.yaml
+  aria/
+    core/        event_bus · service · registry · config · watchdog · governor · telemetry (logging + timeline + metrics)
+    perception/  camera · detector · tracker · face · scene · tamper
+    audio/       mic · vad · turn (smart-turn) · stt · lid · speaker_id
+    cognition/   dialogue · attention · guardrails · providers/
+    expression/  tts/ · display
+    memory/      profiles · sessions · cards · recall
+  tests/         contracts/ (per-interface suites) · scenarios/ (CSV-derived) · fixtures/ · golden/
+  tools/         record_fixture.py · replay.py · bench_vision.py · bench_audio.py · timeline_view.py · dashboard.py</pre>
+<h2>Modularity rules (how expansion stays easy)</h2>
+<ul>
+  <li><b>Feature = Service + config entry.</b> Adding a capability: implement <code>Service</code>, declare its config schema and the events it produces/consumes, register in YAML. Removing a capability: disable its config entry (or delete the folder) — nothing else changes.</li>
+  <li><b>One interface per domain:</b> <code>Detector</code>, <code>Tracker</code>, <code>FaceRecognizer</code>, <code>STT</code>, <code>TTSBackend</code>, <code>ChatProvider</code>, <code>MemoryStore</code>. Improvements arrive as new implementations behind the same interface.</li>
+  <li><b>Events are the contract:</b> the event registry is documented; adding a consumer never requires touching publishers, which is what keeps perception, cognition, and expression independently evolvable.</li>
+  <li><b>Profiles over forks:</b> laptop and Jetson differ by config profile (models, placement, defaults), never by code branches.</li>
+  <li><b>Test tooling is product code:</b> fixture recording/replay exists from Phase 1, so every later phase is validated against identical deterministic scenes.</li>
+</ul>
+</div>
+
+<!-- ============ 13 ============ -->
+<div class="section">
+<h1>13. Phases 0–7 with exit criteria</h1>
+<table>
+  <tr><th style="width:13%">Phase</th><th style="width:47%">Scope</th><th style="width:40%">Exit criteria</th></tr>
+  <tr><td><b>0 — Skeleton</b></td><td>Repo scaffold; <code>ROADMAP.md</code> + <code>ARCHITECTURE.md</code>; core primitives (EventBus, Service, Registry, Config, Watchdog, Governor); <b>structured logging + event timeline recorder (§9)</b>; <b>test scaffolding (§10)</b>: contract-test harness, hermetic fakes, fixture recorder.</td><td>Services start/stop/restart cleanly from config; heartbeat supervision demonstrable; bounded-queue backpressure tested; every service emits structured logs with correlation ids; the contract suite passes green on fakes.</td></tr>
+  <tr><td><b>1 — Unified Perception</b></td><td>Camera service (hot-reconnect) + YOLO26n + ByteTrack → SceneManager; FacePipeline (SCRFD + ArcFace, voting, gallery); tamper detector; debug overlay with track/identity HUD; first fixture recordings (single, group, handoff, occlusion).</td><td>0/1/N people via one code path; track survives 3 s occlusion; identity stable across re-approach; periodic re-verification demonstrable; <code>bench_vision</code> within §4 budget; scenario tests run against fixtures, not live people.</td></tr>
+  <tr><td><b>2 — Audio</b></td><td>Mic + device monitor; Silero VAD + Smart Turn end-of-turn (three-tier, §5.1); faster-whisper large-v3-turbo (English-first per scope decision); ECAPA voice-prints; TTS abstraction (Piper1-GPL + Kokoro + edge-tts); barge-in v1 (duck on speech).</td><td>FUNC-14 Steps 8/10/11/12 behaviors fixed in replay tests; measured EOU latency and Smart-Turn false-response rate on pause fixtures; utterance gating verified end-to-end.</td></tr>
+  <tr><td><b>3 — Cognition</b></td><td>Dialogue FSM (<code>IDLE→GREETING→CONVERSING→HANDOFF→FAREWELL→CLOSED</code>); AttentionPolicy; ChatProvider (cloud + Ollama fallback router); Guardrails + ID masking.</td><td>Full conversation on laptop; NFR-06 probes mitigated (no secrets leak, canary filter works); network cut → local model answers.</td></tr>
+  <tr><td><b>4 — Memory</b></td><td>ProfileStore; MemoryCards; RecallComposer; retention/expiry and wipe semantics.</td><td>FUNC-10 recall scenario passes (same-day + next-day via timestamps); masking edge-case regression tests pass.</td></tr>
+  <tr><td><b>5 — Robustness</b></td><td>Watchdog self-heal; hot device reconnect; degradation modes; Resource Governor enforcement; soak tests.</td><td>Camera crash heals without app restart (NFR-03); RSS returns to baseline after sessions (NFR-05); device replug detected live.</td></tr>
+  <tr><td><b>6 — Validation</b></td><td>CSV-derived test matrix as scripted + manual checklist; fixture replay harness; latency/memory dashboard; internship demo mode.</td><td>All mapped defect rows (§14) demonstrated fixed or explicitly deferred with reasons; demo runs end-to-end on the laptop.</td></tr>
+  <tr><td><b>7 — Jetson track</b></td><td>TensorRT INT8 export notes; JetPack deployment guide; mic-array/directionality research; diarization; passive anti-spoofing; Derja STT research; LiDAR re-integration as sensor service.</td><td>Deployment guide validated on-device (when hardware access is granted); research items produce go/no-go decisions.</td></tr>
+</table>
+<p>Phases 0–6 target the laptop and are sequenced so each phase ends with something demo-able. Phase 7 is designed now (interfaces and config reserved) but executed when Jetson access is available.</p>
+</div>
+
+<!-- ============ 14 ============ -->
+<div class="section">
+<h1>14. Defect → feature → phase map</h1>
+<table>
+  <tr><th style="width:14%">CSV ref</th><th style="width:40%">Defect / observation</th><th style="width:31%">Prototype feature</th><th style="width:15%">Phase</th></tr>
+  <tr><td>FUNC-14 S8</td><td>Hard-coded pause timeout cuts users off mid-sentence.</td><td>Three-tier turn detection: VAD → Smart Turn → threshold fallback.</td><td>2</td></tr>
+  <tr><td>FUNC-14 S11–12</td><td>Non-speech noise transcribed; overheard speech answered.</td><td>VAD + engagement gating + voice-print check.</td><td>2</td></tr>
+  <tr><td>FUNC-14 S10</td><td>Silence timeout works but is fixed and opaque.</td><td>Tiered turn-detection policy, documented and tunable.</td><td>2</td></tr>
+  <tr><td>FUNC-10 S1–2</td><td>No same-day/next-day topic recall.</td><td>MemoryCards + RecallComposer.</td><td>4</td></tr>
+  <tr><td>FUNC-07 S7</td><td>Short input flips language ("hello" → German).</td><td><b>Out of scope</b> — English-only POC (project decision).</td><td>—</td></tr>
+  <tr><td>FUNC-07 S6</td><td>Mid-sentence AR↔FR code-switching unhandled.</td><td><b>Out of scope</b> (project decision); documented in §5.2.</td><td>—</td></tr>
+  <tr><td>FUNC-07 S13</td><td>Overlapping speakers merged into one transcript.</td><td>Polite one-at-a-time prompt; diarization stays a research item.</td><td>2/7</td></tr>
+  <tr><td>FUNC-06 S2</td><td>Unregistered tester matched to a registered profile.</td><td>Multi-frame identity voting with margin.</td><td>1</td></tr>
+  <tr><td>FUNC-06 S8–9</td><td>Photo/screen spoof accepted.</td><td>Passive liveness research (stretch).</td><td>7</td></tr>
+  <tr><td>FUNC-05 S3–4, S8</td><td>Profile/gaze-down/mask detection failures; gaze-down reads as departure.</td><td>Body-track presence + multimodal departure.</td><td>1</td></tr>
+  <tr><td>FUNC-05 S13</td><td>No camera-tamper awareness.</td><td>Frame-statistics tamper detector + alert.</td><td>1</td></tr>
+  <tr><td>FUNC-11</td><td>No group interaction capability.</td><td>SceneManager + AttentionPolicy; group tests from the CSV become acceptance tests.</td><td>1/3/6</td></tr>
+  <tr><td>FUNC-04</td><td>LiDAR untested (blocked).</td><td>Camera presence for POC; LiDAR as pluggable sensor later.</td><td>7</td></tr>
+  <tr><td>NFR-01 S3</td><td>Fixed 20 s face-only departure; no ID-locking; wrong-person inheritance.</td><td>Multimodal departure + ID-lock + re-verification.</td><td>1/3</td></tr>
+  <tr><td>NFR-03 S2/S6</td><td>Camera crash needs full restart; replug not detected.</td><td>Watchdog self-heal + DeviceMonitor hot reconnect.</td><td>5</td></tr>
+  <tr><td>NFR-03 S4</td><td>Network loss → "technical difficulties".</td><td>Local LLM fallback router.</td><td>3</td></tr>
+  <tr><td>NFR-04 S1</td><td>Manual audio device reselection after reboot.</td><td>Config-pinned device selection with fallback.</td><td>2/5</td></tr>
+  <tr><td>NFR-05 S1–3</td><td>+300–400 MB never reclaimed after sessions.</td><td>Bounded queues, teardown, governor, soak-test gate.</td><td>0/5</td></tr>
+  <tr><td>NFR-06 S2–5</td><td>System prompt fully extractable via injection.</td><td>No-secrets design + input screening + canary output filter.</td><td>3</td></tr>
+  <tr><td>NFR-07 S1</td><td>Sensitive-ID masking trigger edge cases.</td><td>Policy-layer masking with regression tests.</td><td>3/4</td></tr>
+  <tr><td>NFR-07 S4 / FUNC-06 note</td><td>Fast A→B swap inherits A's context (context theft).</td><td>Identity re-verification + freeze-and-re-auth on suspicion.</td><td>1/3</td></tr>
+  <tr><td>FUNC-13 S1</td><td>No live interruption by design.</td><td>Streaming pipeline + barge-in v1 (duck/pause TTS).</td><td>2</td></tr>
+</table>
+</div>
+
+<!-- ============ 15 ============ -->
+<div class="section">
+<h1>15. Assumptions, limitations, risks</h1>
+<h2>15.1 Assumptions</h2>
+<ul>
+  <li>Internet is available on the laptop for cloud LLM/TTS defaults; the design is fully offline-capable by config (Piper1-GPL + Kokoro + Ollama) for the Jetson target.</li>
+  <li>POC uses the laptop webcam + a headset mic; <code>CameraService</code> abstracts the source (webcam / CSI / recorded file / replay), so the robot's real sensors plug in without re-architecture.</li>
+  <li>The current robot uses a CSI camera + USB mic + LiDAR + screen; all are represented as swappable services in the target architecture.</li>
+  <li>Jetson hardware access comes later; Phase 7 is designed now and executed then.</li>
+</ul>
+<h2>15.2 Known limitations (documented, not hidden)</h2>
+<ul>
+  <li>Multi-language interaction (Arabic, French, Derja) is deliberately <b>out of scope</b> per project decision — English-only POC. Contracts keep language fields so a language can be added later by configuration; Derja is permanently out of scope for this architecture class.</li>
+  <li>Overlapping-speaker separation is not in the POC's first milestone; the system politely requests one-at-a-time speech (the human-appropriate version of diarization-lite).</li>
+  <li>Passive anti-spoofing (photo/screen liveness) is research, not a POC-phase guarantee.</li>
+  <li>Cloud prompt injection can be mitigated, not eliminated — the no-secrets design bounds the blast radius and the residual risk is documented in ARCHITECTURE.md.</li>
+</ul>
+<h2>15.3 Risks &amp; mitigations</h2>
+<table>
+  <tr><th style="width:30%">Risk</th><th style="width:35%">Impact</th><th style="width:35%">Mitigation</th></tr>
+  <tr><td>6 GB VRAM proves tighter than budgeted with the local LLM loaded.</td><td>Fallback path latency or OOM.</td><td>Governor demotes STT to CPU; LLM loads on demand only; budget re-benchmarked in Phase 1 before Phase 3 commits to the local model.</td></tr>
+  <tr><td>Tracker choice underperforms on real scenes (ID swaps).</td><td>Identity churn breaks sessions.</td><td>Tracker is a YAML swap; Phase 1 spike benchmarks ByteTrack vs BoT-SORT (with ReID) on recorded fixtures before freeze.</td></tr>
+  <tr><td>Whisper LID margin policy feels wrong in practice.</td><td>Language flip-flops or sticks wrongly.</td><td>Margin and prior are runtime-configurable; logged per-utterance for tuning with real usage.</td></tr>
+  <tr><td>Windows-specific audio/camera quirks slow the POC.</td><td>Schedule slip.</td><td>Device abstraction + fixture replay means Linux/Jetson validation does not re-derive the pipeline.</td></tr>
+  <tr><td>Newer-model churn (YOLO26, Smart Turn, Qwen3) — young libraries.</td><td>API changes or subtle behavioral regressions after upgrades.</td><td>Version-pinned requirements; contract tests + fixtures make swaps cheap; golden-file diffs surface behavior changes before they reach the robot.</td></tr>
+  <tr><td>Scope creep from "bugs worth having as features".</td><td>Prototype never lands.</td><td>Every CSV item is mapped to exactly one phase (§12) or explicitly deferred to Phase 7 — the map is the scope control.</td></tr>
+</table>
+<div class="footer-mark">ARIA-POC — Security Robot Architecture Analysis &amp; Roadmap · v1.2 · 2026-09-19 · Prepared by Fedi Souihi · Phase 0 in progress (skeleton + observability + test scaffolding).</div>
+</div>
+
+</body>
+</html>

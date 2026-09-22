@@ -1,0 +1,48 @@
+# --- Python -----------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+env/
+
+# --- Model weights (1.7 GB) -------------------------------------------------
+# Deliberately not in git. Fetch them with:   python tools/fetch_models.py
+# That script pins a SHA-256 per file, so every machine (laptop or Jetson) gets
+# the exact models these results were measured with.
+weights/
+*.pt
+*.onnx
+*.bin
+
+# --- Runtime output ---------------------------------------------------------
+logs/
+logs_bench/
+logs_test/
+logs_debug/
+*.jsonl
+
+# --- Enrolled biometrics: NEVER commit --------------------------------------
+# Face galleries and voice-prints are embeddings of real people, produced
+# locally by tools/enroll.py and tools/enroll_voice.py.
+data/
+*.npz
+
+# --- Locally recorded media -------------------------------------------------
+# Camera/mic captures of real people made while testing. The bundled fixtures
+# (fixtures/audio/*.wav, fixtures/bus.jpg, fixtures/single/video.mp4) ARE
+# committed because the test suite and benchmarks replay them.
+fixtures/camera/
+fixtures/mic/
+fixtures/recovered/
+fixtures/single/recorded_*
+fixtures/audio/recorded_*
+
+# --- OS / editor junk -------------------------------------------------------
+Thumbs.db
+desktop.ini
+.DS_Store
+.vscode/
+.idea/
+*.swp

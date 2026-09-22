@@ -1,0 +1,9 @@
+# ARIA-POC — benchmarking profile: the laptop stack with a silent console.
+#
+# Same services as laptop.yaml (deep-merged), but the console logger is quiet so
+# stdout contains only the JSON metrics summary. Used by tools/measure_load.py and
+# any script that needs to parse metrics instead of reading pretty log lines.
+extends: laptop.yaml
+
+logging:
+  console: quiet

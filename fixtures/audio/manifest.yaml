@@ -1,0 +1,49 @@
+# Audio bench manifest — what the pipeline *should* do with each fixture.
+# `expect: accept`       → the gate must accept and respond
+# `expect: no_response`  → no accepted utterance (no turn, or a rejected one)
+#
+# Language fields guard the "don't translate" rule end to end:
+#   expect_language / expect_script / expect_any_of  → the transcript stays in
+#     the spoken language (Whisper auto-detect + task=transcribe);
+#   expect_voice_contains / expect_spoken_any_of     → the reply is spoken by a
+#     voice for that language, with a localised wrapper.
+- name: greeting
+  path: fixtures/audio/greeting.wav
+  expect: accept
+  expect_language: en
+  expect_any_of: [library]
+  expect_voice_contains: en-US
+  note: clear single-speaker question (edge-tts voice A)
+- name: question
+  path: fixtures/audio/question.wav
+  expect: accept
+  expect_language: en
+  expect_any_of: [cafeteria]
+  expect_voice_contains: en-US
+  note: clear question from a different speaker (edge-tts voice B)
+- name: fr_library
+  path: fixtures/audio/fr_library.wav
+  expect: accept
+  expect_language: fr
+  expect_script: latin
+  expect_any_of: ["biblioth", "livre", "trouve"]
+  expect_voice_contains: fr-FR
+  expect_spoken_any_of: ["entendu"]
+  note: French in, French text out, French voice back — never English
+- name: ar_greeting
+  path: fixtures/audio/ar_greeting.wav
+  expect: accept
+  expect_language: ar
+  expect_script: arabic
+  expect_any_of: ["مكتب", "مرحب", "اين", "أين"]
+  expect_voice_contains: ar-MA
+  expect_spoken_any_of: ["سمعتك"]
+  note: Arabic in, Arabic script out, Moroccan voice back — never translated
+- name: noise_only
+  path: fixtures/audio/noise_only.wav
+  expect: no_response
+  note: stationary noise, no speech (FUNC-14 false-response class)
+- name: short_click
+  path: fixtures/audio/short_click.wav
+  expect: no_response
+  note: brief non-speech burst (FUNC-14 noise class)

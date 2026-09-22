@@ -1,0 +1,25 @@
+# Audio-only profile — the voice loop with no vision stack.
+#
+# Use this to test/demo conversation in isolation, and to get the lowest reply
+# latency: the vision stack (YOLO + face) shares the GPU with Whisper, and
+# measuring showed it costs ~0.5 s of speech_end→transcript
+# (0.88 s audio-only vs 1.44 s with vision at 15 Hz on the RTX 4050).
+#
+# Everything else is inherited from laptop.yaml, so this is a pure config
+# variant: no code path is different.
+extends: laptop.yaml
+name: laptop-audio-only
+
+services:
+  camera:
+    enabled: false
+  vision:
+    enabled: false
+  face:
+    enabled: false
+  scene:
+    enabled: false
+  tamper:
+    enabled: false
+  display:
+    enabled: false

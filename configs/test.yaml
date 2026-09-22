@@ -1,0 +1,94 @@
+# Fast, hermetic profile used by tests and short demo runs.
+logging:
+  level: INFO              # file sink records service activity (console stays quiet)
+  console: quiet
+  dir: logs_test
+  max_bytes_mb: 1
+  backups: 1
+
+runtime:
+  duration: 0
+
+event_bus:
+  default_maxsize: 8
+
+governor:
+  interval: 0.05
+  ram_throttle_mb: 100000
+  ram_release_mb: 90000
+
+watchdog:
+  interval: 0.05
+  stale_after: 0.2
+  max_restarts: 3
+  backoff: 0.01
+
+services:
+  camera:
+    class: "aria.perception.camera:CameraService"
+    enabled: true
+    config:
+      source: fake
+      fps: 50
+      fake_pixels: true     # noise pixels → FrameStore so pixel consumers run hermetically
+      heartbeat_interval: 0.05
+  scene:
+    class: "aria.perception.scene:SceneManagerService"
+    enabled: true
+    config:
+      heartbeat_interval: 0.05
+  vision:
+    class: "aria.perception.vision:PersonVisionService"
+    enabled: false          # ML stack stays out of hermetic runs (built on demand in tests)
+  face:
+    class: "aria.perception.face:FacePipelineService"
+    enabled: false
+  tamper:
+    class: "aria.perception.tamper:TamperService"
+    enabled: true            # hermetic Frame consumer (pure statistics, no models)
+    config:
+      every: 5
+      width_downscale: 64
+      heartbeat_interval: 0.05
+  display:
+    class: "aria.perception.display:DebugDisplayService"
+    enabled: false
+  # --- audio frontend: hermetic subset (models stay out of fast runs) ---
+  mic:
+    class: "aria.audio.mic:MicService"
+    enabled: true
+    config:
+      source: fake
+      heartbeat_interval: 0.05
+  vad:
+    class: "aria.audio.vad:VadService"
+    enabled: false
+  turn:
+    class: "aria.audio.turn:TurnDetectorService"
+    enabled: false
+  stt:
+    class: "aria.audio.stt:SttService"
+    enabled: false
+  voiceprint:
+    class: "aria.audio.voiceprint:VoiceprintService"
+    enabled: false
+  gate:
+    class: "aria.audio.gate:VoiceGateService"
+    enabled: true
+    config: { voiceprint_wait_s: 0.0, heartbeat_interval: 0.05 }
+  responder:
+    class: "aria.audio.responder:StubResponderService"
+    enabled: true
+    config: { heartbeat_interval: 0.05 }
+  tts:
+    class: "aria.audio.tts:TtsService"
+    enabled: true
+    config: { provider: fake, playback: false, heartbeat_interval: 0.05 }
+  governor:
+    class: "aria.core.governor:GovernorService"
+    enabled: true
+    config: { heartbeat_interval: 0.05 }
+  watchdog:
+    class: "aria.core.watchdog:WatchdogService"
+    enabled: true
+    config: { heartbeat_interval: 0.05 }

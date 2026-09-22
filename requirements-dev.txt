@@ -1,0 +1,17 @@
+# Optional extras: NOT needed to run ARIA-POC, only for experiments.
+#   pip install -r requirements-dev.txt
+#
+# pytest already ships in requirements.txt because the test suite is the primary
+# way this project is verified, and tools/selfcheck.py runs it.
+
+# Voice-print providers kept as alternates behind the same interface. Both drag
+# in torchaudio/webrtcvad, which is why WavLM-ONNX is the default instead.
+# speechbrain>=1.1.1        # ECAPA-TDNN voice-prints - needs torchaudio
+# resemblyzer>=0.1.4        # d-vector voice-prints - needs webrtcvad (MSVC on Windows)
+
+# Used by tools/calibrate_voice.py for similarity analysis plots.
+# librosa>=0.10
+# matplotlib>=3.8
+
+# EOU / VAD experiments.
+# webrtcvad>=2.0.10

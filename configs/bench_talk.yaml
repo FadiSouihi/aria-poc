@@ -1,0 +1,22 @@
+# ARIA-POC — benchmark profile: a conversation that never stops.
+#
+# Same as laptop.yaml (camera + vision + audio all live), except the microphone is
+# replaced by a looping speech fixture. Every loop produces a real turn: VAD →
+# EOU → Whisper → gate → TTS, with vision running at the same time. Use it with
+# tools/measure_load.py to measure the cost of the app *while it is working*
+# (the idle baseline is much lower and not representative):
+#
+#   python tools/measure_load.py --config configs/bench_talk.yaml
+extends: laptop.yaml
+
+services:
+  mic:
+    config:
+      source: file
+      path: fixtures/audio/question.wav
+      loop: true
+      wait_for_ready: ["stt"]
+      readiness_timeout_s: 60.0
+  tts:
+    config:
+      playback: false        # do not talk over the fixture through the speakers

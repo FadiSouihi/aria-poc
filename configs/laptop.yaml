@@ -1,0 +1,160 @@
+# ARIA-POC — laptop POC profile (Phase 1: unified perception on real sources).
+logging:
+  level: INFO
+  console: pretty          # pretty | json | quiet
+  dir: logs
+  max_bytes_mb: 5
+  backups: 3
+
+runtime:
+  duration: 0              # 0 = run until Ctrl+C
+
+event_bus:
+  default_maxsize: 256
+
+# Flight recorder fidelity vs cost. The tap runs inline on the publishing task,
+# so high-rate metadata is sampled: 1 = every event, N = 1-in-N, 0 = drop.
+# Set every value to 1 for full-fidelity debugging (tools/bench, bug hunts).
+timeline:
+  ring_size: 600
+  sample:
+    Frame: 5          # camera frames: 15/s -> 3/s in the log (pixels stay in FrameStore)
+    AudioChunk: 0     # raw mic chunks: no forensic value, dropped entirely
+
+governor:
+  interval: 5.0
+  ram_throttle_mb: 3500    # process RSS that triggers throttling
+  ram_release_mb: 2800     # hysteresis release threshold
+
+watchdog:
+  interval: 1.0
+  stale_after: 5.0         # heartbeat staleness that counts as crashed
+  stale_safety_factor: 3.0 # never flag a service before 3x its own heartbeat period
+  max_restarts: 5
+  backoff: 0.5
+
+services:
+  # STT first: its model load runs in the background, so starting it before the
+  # vision stack gets it warm ~5 s sooner (speech in the first seconds of a run
+  # is dropped as stale rather than answered late).
+  stt:
+    class: "aria.audio.stt:SttService"
+    enabled: true
+    config:
+      language: auto         # detect the spoken language; never translate
+      max_stale_s: 2.5       # drop turns that are already superseded instead of answering late
+      warmup: true
+  mic:
+    class: "aria.audio.mic:MicService"
+    enabled: true
+    config:
+      source: device       # device | file | fake
+      device: -1           # -1 = system default input
+      # wait_for_ready: ["stt"]   # uncomment to hold capture until STT is warm
+  camera:
+    class: "aria.perception.camera:CameraService"
+    enabled: true
+    config:
+      source: webcam       # webcam | file | fake  (file: set path:)
+      device: 0
+      fps: 15
+      backend: dshow
+      heartbeat_interval: 1.0   # frequent beats + 5 s tolerance = no spurious restarts
+  vision:
+    class: "aria.perception.vision:PersonVisionService"
+    enabled: true
+    config:
+      model: "yolo26n.pt"          # fallback chain below; config-only swap
+      fallback_models: ["yolo11n.pt"]
+      device: auto                 # auto | cuda | cpu
+      detect_hz: 15
+      busy_detect_hz: 5            # yield to STT/TTS while a turn is processed or spoken
+      busy_after_turn_s: 1.5       # keep yielding briefly after speech ends (covers Whisper)
+      yield_while_speaking: true
+      conf: 0.30
+      tracker_yaml: "configs/tracker_bytetrack.yaml"
+  face:
+    class: "aria.perception.face:FacePipelineService"
+    enabled: true
+    config:
+      pace_every: 3        # face pass ~5 Hz when vision runs at 15 Hz
+      reverify_s: 5.0
+      ort_threads: 1       # small model, infrequent: one thread, no spin-wait
+      opencv_threads: 2    # cap cv2's own parallel loops (YuNet DNN, resize)
+  scene:
+    class: "aria.perception.scene:SceneManagerService"
+    enabled: true
+    config: {}
+  tamper:
+    class: "aria.perception.tamper:TamperService"
+    enabled: true
+    config: {}
+  display:
+    class: "aria.perception.display:DebugDisplayService"
+    enabled: true          # set false for headless runs
+    config:
+      flip: horizontal     # mirror the view (selfie-like); press f to cycle, or none/vertical/both
+      fit: letterbox       # keep the camera's aspect ratio instead of stretching into the window
+      window_width: 960
+      target_fps: 15       # redraw at the camera rate; faster only burns CPU
+  # --- audio frontend (Phase 2) ---
+  vad:
+    class: "aria.audio.vad:VadService"
+    enabled: true
+    config:
+      min_silence_ms: 320    # measured floor: 220/250/280 ms truncate or split the FR/AR fixtures
+      ort_threads: 1         # ~31 calls/s on a tiny graph: ORT's defaults spin-wait here
+  turn:
+    class: "aria.audio.turn:TurnDetectorService"
+    enabled: true
+    config:
+      threshold: 0.45        # decisive a bit sooner; measured p_turn is usually 0.87-0.99
+      pending_timeout_s: 1.0 # how long to keep listening when the model is unsure
+      ort_threads: 1
+  voiceprint:
+    class: "aria.audio.voiceprint:VoiceprintService"
+    enabled: true
+    config:
+      ort_threads: 2         # WavLM is heavy but per-turn: a couple of threads help latency
+  gate:
+    class: "aria.audio.gate:VoiceGateService"
+    enabled: true
+    config:
+      voiceprint_wait_s: 0.08   # let the voice-print land without stalling the reply
+  responder:
+    class: "aria.audio.responder:StubResponderService"
+    enabled: true
+    config:
+      template: "I heard you say: {text}"
+      templates:
+        fr: "J'ai entendu : {text}"
+        ar: "سمعتك تقول: {text}"
+        es: "Te he oído decir: {text}"
+  tts:
+    class: "aria.audio.tts:TtsService"
+    enabled: true
+    config:
+      voice: en-US-AriaNeural
+      voices:              # reply in the language that was spoken (no translation)
+        en: en-US-AriaNeural
+        fr: fr-FR-DeniseNeural
+        ar: ar-MA-MounaNeural      # Moroccan voice; ar-SA-ZariyahNeural as an alternate
+        es: es-ES-ElviraNeural
+      clause_pipelining: true      # start speaking before the whole reply is synthesized
+      cache_size: 32
+      playback_latency: low        # WASAPI: less buffering before the first sample is heard
+      # Pre-synthesized at startup so the first clause of a reply is instant
+      # (must match responder.templates' prefixes).
+      warm_phrases:
+        en: ["I heard you say:"]
+        fr: ["J'ai entendu :"]
+        ar: ["سمعتك تقول:"]
+        es: ["Te he oído decir:"]
+  governor:
+    class: "aria.core.governor:GovernorService"
+    enabled: true
+    config: {}
+  watchdog:
+    class: "aria.core.watchdog:WatchdogService"
+    enabled: true
+    config: {}

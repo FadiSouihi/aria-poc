@@ -1,0 +1,45 @@
+# ARIA-POC runtime dependencies (cross-platform: Windows, Linux, Jetson).
+#
+#   Windows : .\setup.ps1        Linux / Jetson : ./setup.sh
+#
+# PyTorch is NOT listed here on purpose: it does not come from PyPI for CUDA, and
+# on Jetson it comes from NVIDIA's own index instead. The setup scripts install
+# the right build for the machine; manually it is:
+#
+#   x86-64 + NVIDIA GPU : pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126
+#   x86-64 CPU only     : pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+#   Jetson (JetPack 6.1): pip install torch torchvision --index-url https://developer.download.nvidia.com/compute/redist/jp/v61/pytorch
+#
+# NOTE - torchaudio is deliberately NOT a dependency:
+#   * the CUDA torch builds we use have no matching torchaudio, and adding one
+#     downgrades torch and breaks torchvision (`operator torchvision::nms does
+#     not exist`);
+#   * everything we needed from it is implemented in-repo instead:
+#       - Silero VAD v5 runs directly on weights/silero_vad.onnx (onnxruntime);
+#       - Smart Turn's whisper log-mel is computed in numpy (aria/audio/turn.py).
+#   Do not add the `silero-vad` package either: it hard-imports torchaudio.
+#
+# NOTE - voice-prints use the raw-waveform WavLM ONNX model, not SpeechBrain:
+#   speechbrain hard-imports torchaudio, and `resemblyzer` needs `webrtcvad`,
+#   which requires MSVC build tools on Windows. Both stay optional extras
+#   (requirements-dev.txt).
+
+# --- core (Phase 0) ---
+PyYAML>=6.0.1
+psutil>=6.0.0               # governor RSS sampling, tools/measure_load.py
+pytest>=8.0.0               # the project is test-first: tests ship with the code
+numpy>=1.26
+
+# --- perception (Phase 1) ---
+ultralytics>=8.4.0          # YOLO26n detection + ByteTrack tracking
+opencv-python>=4.10         # YuNet face detection, HUD, frame handling
+onnxruntime>=1.20           # SFace, Silero VAD, Smart Turn, WavLM (all CPU provider)
+
+# --- audio frontend (Phase 2) ---
+faster-whisper>=1.2.0       # CTranslate2 Whisper (large-v3-turbo) - STT
+ctranslate2>=4.5            # ships with faster-whisper; listed for clarity
+sounddevice>=0.5.0          # mic capture + TTS playback (needs PortAudio)
+edge-tts>=7.0               # default TTS provider (cloud, best quality)
+pyttsx3>=2.90               # offline fallback TTS (SAPI5 on Windows, espeak-ng on Linux)
+av>=13.0                    # decode edge-tts MP3 to float32 PCM
+huggingface_hub>=0.30       # model downloads (tools/fetch_models.py)

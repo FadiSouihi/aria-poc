@@ -1,0 +1,11 @@
+name: single
+recorded_at: '2026-09-20T13:48:18'
+source: webcam
+device: 0
+origin_path: null
+fps: 15.0
+width: 640
+height: 480
+frames: 583
+duration_s: 20.27
+notes: live webcam capture during Phase 1 (operator at desk)

@@ -1,0 +1,17 @@
+# Keep text files LF in the repo so the same code works on Windows and Jetson,
+# while Windows scripts stay CRLF so PowerShell/cmd are happy.
+* text=auto eol=lf
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binary artefacts: never diff or merge them as text.
+*.onnx binary
+*.pt binary
+*.bin binary
+*.npz binary
+*.wav binary
+*.mp4 binary
+*.jpg binary
+*.png binary
+*.pdf binary
