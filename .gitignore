@@ -11,7 +11,11 @@ env/
 # Deliberately not in git. Fetch them with:   python tools/fetch_models.py
 # That script pins a SHA-256 per file, so every machine (laptop or Jetson) gets
 # the exact models these results were measured with.
-weights/
+# NOTE: exclude the *contents*, not the directory itself - a trailing slash on
+# `weights/` would also exclude the directory and make the !.gitkeep rule
+# impossible to honour.
+weights/*
+!weights/.gitkeep
 *.pt
 *.onnx
 *.bin

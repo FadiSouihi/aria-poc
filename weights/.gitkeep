@@ -1,0 +1,7 @@
+Model weights live here but are not stored in git (1.7 GB, and YOLO is AGPL).
+
+    python tools/fetch_models.py            # download + hash-verify everything
+    python tools/fetch_models.py --list     # what, from where, licence, size
+    python tools/fetch_models.py --only vision vad turn face   # ~55 MB, no Whisper
+
+setup.ps1 / setup.sh do this for you during install.

@@ -166,10 +166,11 @@ def download(url: str, dest: pathlib.Path, size: int = 0) -> None:
 
 def fetch(model: Model) -> bool:
     dest = model.path
+    # A fresh clone has no weights/ directory at all.
+    dest.parent.mkdir(parents=True, exist_ok=True)
     if model.hf_snapshot:
         from huggingface_hub import snapshot_download
 
-        dest.parent.mkdir(parents=True, exist_ok=True)
         snapshot_download(model.hf_repo, local_dir=str(dest.parent),
                           allow_patterns=model.hf_snapshot)
         return True
