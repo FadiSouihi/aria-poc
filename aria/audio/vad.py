@@ -1,4 +1,4 @@
-﻿"""VadService — Silero VAD v5 with hot-reconnect-safe streaming.
+"""VadService — Silero VAD v5 with hot-reconnect-safe streaming.
 
 Tier 1 of the three-tier end-of-turn design (ROADMAP §5.2): speech start and
 the *candidate* end of speech. The decision that a turn is actually finished
@@ -28,6 +28,7 @@ _SCHEMA = {
     "model": ("weights/silero_vad.onnx", (str,)),
     "duck_while_speaking": (True, (bool,)),
     "duck_margin_s": (0.3, (int, float)),
+    "post_speech_guard_s": (0.8, (int, float)),   # keep ducking through the room/echo tail
     "threshold": (0.5, (int, float)),
     "min_speech_ms": (250, (int,)),
     "min_silence_ms": (400, (int,)),
@@ -57,7 +58,13 @@ class VadStateMachine:
         self.frames = 0
 
     def update(self, prob: float) -> Optional[str]:
-        """Feed one frame probability → 'started' | 'ended' | None."""
+        """Feed one frame probability → 'started' | 'ended' | None.
+
+        On ``started``, ``frames`` counts the frames of the utterance *including*
+        the one being fed (the transition happens on the last start frame), so the
+        caller can locate the utterance start as ``cursor - (frames - 1) * FRAME``
+        with ``cursor`` already past the current frame.
+        """
         if not self.speaking:
             if prob >= self.threshold:
                 self.voiced += 1
@@ -174,6 +181,7 @@ class VadService(Service):
         self._utt_id: Optional[str] = None
         self._start_index = 0
         self._speaking_until = 0.0  # half-duplex window while TTS plays
+        self._duck_started = False  # edge detector for the duck-window transition
 
     async def init(self) -> None:
         from aria.perception.vision import resolve_repo_path
@@ -216,9 +224,13 @@ class VadService(Service):
 
     async def _on_synthesized(self, event: Event) -> None:
         # TTS publishes once per clause just before that clause plays, so the
-        # window is extended (never shortened) to cover the whole reply.
+        # window is extended (never shortened) to cover the whole reply. The
+        # window deliberately outlives the audio by ``post_speech_guard_s``: a
+        # laptop speaker keeps radiating after the last sample is written, and
+        # that tail was what re-triggered ARIA on itself ("it hears itself").
         margin = float(self.config.get("duck_margin_s", 0.3))
-        until = time.monotonic() + float(event.payload.get("audio_s", 0.0)) + margin
+        guard = float(self.config.get("post_speech_guard_s", 0.8))
+        until = time.monotonic() + float(event.payload.get("audio_s", 0.0)) + margin + guard
         if until > self._speaking_until:
             self._speaking_until = until
         if self._machine is not None and self._machine.speaking:
@@ -229,7 +241,14 @@ class VadService(Service):
         self.metrics.inc("vad.duck_windows")
 
     async def _on_barge_in(self, event: Event) -> None:
-        self._speaking_until = 0.0
+        # A barge-in stops *playback*, but the speaker's echo tail is still in the
+        # air. Do NOT close the duck window here: reopen the mic only after the
+        # tail decays, otherwise the interrupted reply is immediately re-heard,
+        # transcribed and answered — the self-triggering loop.
+        guard = float(self.config.get("post_speech_guard_s", 0.8))
+        until = time.monotonic() + guard
+        if until > self._speaking_until:
+            self._speaking_until = until
 
     def _ducking(self) -> bool:
         return bool(self.config.get("duck_while_speaking", True)) and time.monotonic() < self._speaking_until
@@ -251,9 +270,19 @@ class VadService(Service):
                 continue
             if self._ducking():
                 # Skip analysis entirely: keep the cursor moving, ignore audio.
+                # Entering the window drops any in-flight utterance (the duck
+                # window is not speech), so nothing ends with a stale duration
+                # when the mic reopens.
+                if not self._duck_started:
+                    self._duck_started = True
+                    if self._machine.speaking:
+                        self._machine.reset()
+                        self._utt_id = None
+                        self.metrics.inc("vad.ducked_utterances")
                 self._cursor += frames * FRAME
                 self.metrics.inc("vad.ducked_frames", frames)
                 continue
+            self._duck_started = False
             for i in range(frames):
                 frame = audio[i * FRAME: (i + 1) * FRAME]
                 if frame.size < FRAME:
@@ -267,12 +296,18 @@ class VadService(Service):
         self.metrics.observe("vad.prob", prob)
         if decision == "started":
             self._utt_id = uuid.uuid4().hex[:8]
-            self._start_index = self._cursor - FRAME * self._machine.frames
+            # ``frames`` includes the frame just fed and the cursor is already past
+            # it, hence ``frames - 1`` back: claiming one frame more would put the
+            # segment 32 ms before the speech actually began.
+            self._start_index = self._cursor - FRAME * max(1, self._machine.frames - 1)
+            level = dbfs(self._store.read_since(self._start_index))
             self.metrics.inc("vad.speech_started")
-            self.log.info("Speech started", utterance_id=self._utt_id,
-                          dbfs=round(dbfs(self._store.read_since(self._start_index)), 1))
+            self.log.info("Speech started", utterance_id=self._utt_id, dbfs=round(level, 1))
+            # ``dbfs`` travels with the event: TTS uses it to tell a person
+            # interrupting from ARIA's own quieter speaker echo.
             await self.bus.publish(Event("SpeechStarted", {
                 "utterance_id": self._utt_id, "start_index": int(self._start_index),
+                "dbfs": round(level, 1),
             }))
         elif decision in ("ended", "ended_timeout"):
             duration = self._machine.speech_duration_s()

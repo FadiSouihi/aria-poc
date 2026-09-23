@@ -15,7 +15,7 @@ cd aria-poc
 .\setup.ps1                                # venv + deps + CUDA torch + models + selfcheck
 
 .venv\Scripts\python.exe main.py --config configs\laptop.yaml --duration 60
-.venv\Scripts\python.exe run_tests.py      # contract suite (145 tests, all green)
+.venv\Scripts\python.exe run_tests.py      # contract suite (147 tests, all green)
 ```
 
 **Linux / Jetson Orin Nano**
@@ -89,7 +89,7 @@ python tools/selfcheck.py --full       # + VRAM/latency + EOU/false-response ben
 Or run the pieces manually:
 
 ```powershell
-python run_tests.py                                            # 133 contract/integration tests
+python run_tests.py                                            # 147 contract/integration tests
 python main.py --config configs/laptop.yaml --duration 60      # webcam + YOLO + HUD + voice (q closes window)
 python tools\bench_vision.py --source file --path fixtures/bus.jpg --seconds 8 --assert
 python tools\bench_audio.py --manifest fixtures\audio\manifest.yaml --assert
@@ -191,17 +191,23 @@ Measured on this laptop (RTX 4050, `tools/bench_audio.py --assert` + a live run)
       same-speaker 0.92 vs other-speaker 0.45–0.49, gallery in `data/voices/*.npz`
 - [x] **TTS with barge-in** — edge-tts default, offline SAPI5 fallback, clause
       pipelining (next clause synthesized while the current one plays, LRU cache),
-      playback stops on interruption; half-duplex ducking prevents self-echo
-- [x] **No reply backlog** — STT turns are queued and **dropped when stale**
-      (`max_stale_s`, checked at enqueue *and* dequeue) instead of answered out of
-      order; live `speech_end→transcript` p50 **880 ms** (was 1144–4883 ms)
+      playback stops on a *genuine* interruption; half-duplex ducking plus an
+      echo-tail guard keeps ARIA from hearing her own speaker, and a barge-in must
+      clear a loudness floor (`barge_in_min_dbfs`) so her own quieter echo is
+      ignored instead of stopping the reply (`tts.barge_in_ignored_quiet`)
+- [x] **No reply backlog, and no self-conversation** — STT is **single-flight**:
+      a turn that arrives while Whisper is busy is *dropped* (`stt.dropped_busy`)
+      rather than queued, so noise with pauses cannot build a backlog, and a turn
+      older than `max_stale_s` is dropped too (checked at admission *and* after the
+      readiness wait); live `speech_end→transcript` p50 **880 ms** (was 1144–4883 ms)
 - [x] **Reply starts instantly, with no gap mid-reply** — the reply prefix is
       pre-synthesized at start-up (`tts.warm_phrases`) so the first clause costs
       **0.0 ms**, clauses are played through **one** low-latency output stream
       (opening one per clause was audible dead air: `tts.clause_gap_ms` **0.9 ms**
       now), and the gate no longer waits for a voice-print that cannot exist
       (`transcript→decision` 83–145 ms → **0 ms**)
-- [x] **97→145/145 tests green** (hermetic contract suites + real-model integration)
+- [x] **147/147 tests green** (138 hermetic contract suites + 9 real-model
+      integration)
 - [x] Live run: 487 mic → 487 VAD chunks, 2 speech events → 2 turns → 2
       transcripts → 2 accepted → 2 replies → 3 spoken clauses, **0 restarts**,
       935 events, **0 dropped**

@@ -199,3 +199,35 @@ def test_no_barge_in_when_not_speaking():
         await svc.stop()
         await bus.stop()
     run(scenario())
+
+
+def test_quiet_speech_is_not_a_barge_in_own_speaker_echo():
+    """Regression (robot answers itself): with a speaker and no AEC the mic hears
+    ARIA's own reply. That quiet "speech" stopped playback, reopened the VAD duck
+    window and made the robot transcribe and answer itself in a loop. It must be
+    ignored — playback keeps going — while a loud interruption still works."""
+    async def scenario():
+        bus = make_bus()
+        await bus.start()
+        barge = Collector()
+        bus.subscribe("BargeIn", barge, policy="block", maxsize=4)
+        svc = attach(TtsService(), bus, dict(CFG, barge_in_min_dbfs=-32.0))
+        await svc.start()
+        svc._speaking = True
+        svc._current_text = "Welcome to the university."
+
+        # ARIA's own echo coming back through the speaker: ~-41 dBFS.
+        await svc._on_speech_started(Event("SpeechStarted", {"utterance_id": "echo", "dbfs": -41.6}))
+        assert barge.events == []
+        assert not svc._stop_playback.is_set()
+        assert svc.metrics.snapshot()["counters"]["tts.barge_in_ignored_quiet"] == 1
+
+        # A real person interrupting: ~-22 dBFS.
+        await svc._on_speech_started(Event("SpeechStarted", {"utterance_id": "user", "dbfs": -22.0}))
+        await barge.wait_for(1, timeout=3)
+        assert barge.events[0].payload["interrupted_text"] == "Welcome to the university."
+        assert svc._stop_playback.is_set()
+        assert svc.metrics.snapshot()["counters"]["tts.barge_ins"] == 1
+        await svc.stop()
+        await bus.stop()
+    run(scenario())

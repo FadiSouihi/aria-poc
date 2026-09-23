@@ -42,7 +42,9 @@ services:
     enabled: true
     config:
       language: auto         # detect the spoken language; never translate
-      max_stale_s: 2.5       # drop turns that are already superseded instead of answering late
+      # No queue: a turn that arrives while Whisper is busy is dropped rather
+      # than answered late. This also bounds staleness in a noisy room.
+      max_stale_s: 2.5
       warmup: true
   mic:
     class: "aria.audio.mic:MicService"
@@ -103,6 +105,10 @@ services:
     enabled: true
     config:
       min_silence_ms: 320    # measured floor: 220/250/280 ms truncate or split the FR/AR fixtures
+      # Half-duplex echo guard: the duck window outlives the played audio by this
+      # much, because the speaker keeps radiating after the last sample is
+      # written and that tail is what made ARIA hear (and answer) itself.
+      post_speech_guard_s: 0.8
       ort_threads: 1         # ~31 calls/s on a tiny graph: ORT's defaults spin-wait here
   turn:
     class: "aria.audio.turn:TurnDetectorService"
@@ -143,6 +149,11 @@ services:
       clause_pipelining: true      # start speaking before the whole reply is synthesized
       cache_size: 32
       playback_latency: low        # WASAPI: less buffering before the first sample is heard
+      # Echo gate: a barge-in must be at least this loud. ARIA's own voice coming
+      # back through the speakers measured ~-40 dBFS, a person talking to it
+      # ~-21..-27 dBFS, so anything quieter is ignored and the reply is finished
+      # instead of ARIA interrupting itself.
+      barge_in_min_dbfs: -32.0
       # Pre-synthesized at startup so the first clause of a reply is instant
       # (must match responder.templates' prefixes).
       warm_phrases:

@@ -20,7 +20,12 @@ Three behaviours that matter in conversation:
 Playback runs in a worker thread and is written in chunks so barge-in stops the
 audio immediately; each clause publishes ``SpeechSynthesized`` just before it
 plays, which also keeps the VAD's half-duplex duck window alive for its exact
-duration.
+duration plus a guard that covers the speaker's echo tail.
+
+Barge-in is *evidence-gated* (``barge_in_min_dbfs``). Without AEC the mic hears
+ARIA's own reply; treating that as an interruption stopped playback, reopened the
+VAD window and made the robot answer itself in a loop. A barge-in now requires
+the loudness of a real person — quiet echo is ignored and the reply is finished.
 """
 from __future__ import annotations
 
@@ -47,6 +52,10 @@ _SCHEMA = {
     "rate": (1.0, (int, float)),         # 1.0 = provider default speed
     "playback": (True, (bool,)),
     "barge_in": (True, (bool,)),
+    # A genuine interruption is loud and close; the robot's own voice coming back
+    # through the speaker is much quieter (measured ~-40 dBFS vs -21..-27 dBFS
+    # for the person). Anything quieter than this never counts as a barge-in.
+    "barge_in_min_dbfs": (-32.0, (int, float)),
     "clause_pipelining": (True, (bool,)),
     "cache_size": (32, (int,)),
     "warm_phrases": ({}, (dict,)),       # {"en": ["I heard you say:"], "fr": [...]}: pre-synthesized at start
@@ -300,14 +309,31 @@ class TtsService(Service):
 
     # -- barge-in ----------------------------------------------------------
     async def _on_speech_started(self, event: Event) -> None:
-        if self._speaking:
-            self._stop_playback.set()
-            self.metrics.inc("tts.barge_ins")
-            self.log.info("Barge-in: playback stopped", interrupted=self._current_text[:60])
-            await self.bus.publish(Event("BargeIn", {
-                "utterance_id": event.payload.get("utterance_id"),
-                "interrupted_text": self._current_text,
-            }))
+        if not self._speaking:
+            return
+        level = event.payload.get("dbfs")
+        floor = float(self.config.get("barge_in_min_dbfs", -32.0))
+        # Echo rejection: with a speaker and no AEC, ARIA hears its own reply
+        # through the mic. That false "interruption" used to stop playback, which
+        # then reopened the VAD's duck window, so the robot transcribed its own
+        # words and replied to itself — an endless self-conversation. A barge-in
+        # now needs the loudness of a real person; anything at or below the floor
+        # is ignored (playback continues, the reply is finished).
+        if level is not None and float(level) <= floor:
+            self.metrics.inc("tts.barge_in_ignored_quiet")
+            self.log.info("Ignoring quiet barge-in (own speaker echo)",
+                          dbfs=round(float(level), 1), floor_dbfs=floor,
+                          interrupted=self._current_text[:60])
+            return
+        self._stop_playback.set()
+        self.metrics.inc("tts.barge_ins")
+        self.log.info("Barge-in: playback stopped", interrupted=self._current_text[:60],
+                      dbfs=None if level is None else round(float(level), 1))
+        await self.bus.publish(Event("BargeIn", {
+            "utterance_id": event.payload.get("utterance_id"),
+            "interrupted_text": self._current_text,
+            "dbfs": level,
+        }))
 
     # -- synthesis + playback ----------------------------------------------
     def _cached(self, key: tuple) -> Optional[tuple]:
