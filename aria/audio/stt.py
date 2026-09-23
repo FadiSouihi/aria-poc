@@ -4,18 +4,26 @@ Consumes ``TurnCompleted``, cuts the utterance out of the shared AudioStore,
 transcribes with faster-whisper ``large-v3-turbo`` (int8_float16 on GPU,
 int8 on CPU), and publishes ``UtteranceHeard``.
 
-Two behaviours matter for how the robot *feels* in conversation:
+Three behaviours matter for how the robot *feels* in conversation:
 
 * **Language is detected, never translated.** ``language: auto`` keeps the
   spoken language in the transcript (Whisper's ``task="transcribe"``); forcing
   ``language: en`` makes Whisper render French/Arabic speech as English text,
   which looks like unwanted translation. The detected code travels with the
   utterance so TTS can answer in the same language.
-* **Stale turns are dropped, not queued.** Transcription is serial, so a second
-  utterance used to wait behind the first (measured: up to 4.9 s between speech
-  ending and its transcript). The worker now dequeues in order but discards any
-  turn whose audio ended more than ``max_stale_s`` ago — answering a question
-  you asked five seconds ago is worse than not answering it.
+* **One transcription at a time — new speech while busy is dropped.** Whisper
+  cannot be interrupted, so a turn that arrives while a transcript is in flight
+  used to wait in a bounded queue. In a noisy room every burst with enough pause
+  to end a turn added another item, and the queue became a backlog: the newest
+  (and only still-relevant) utterance sat behind older noise, so ARIA answered
+  things from ten seconds ago and appeared stuck. Turns are now dropped at the
+  door while ``_busy`` (``stt.dropped_busy``) — the next genuine utterance is
+  transcribed as soon as the current one finishes, and nothing is ever answered
+  out of order.
+* **Stale turns are dropped too.** A turn whose audio ended more than
+  ``max_stale_s`` ago is discarded (checked at enqueue *and* again after any
+  readiness wait): answering a question you asked five seconds ago is worse
+  than not answering it.
 
 The governor can force CPU mode (``audio.stt`` listens for
 ``GovernorThrottled``), which is the "demote STT to CPU" path in the budget.
@@ -24,7 +32,6 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections import deque
 from typing import Optional
 
 import numpy as np
@@ -47,7 +54,6 @@ _SCHEMA = {
     "without_timestamps": (True, (bool,)),
     "warmup": (True, (bool,)),
     "max_stale_s": (2.5, (int, float)),    # drop turns older than this instead of answering late
-    "max_queue": (3, (int,)),
     "min_chars": (2, (int,)),
     "max_segment_s": (30.0, (int, float)),
     "heartbeat_interval": (5.0, (int, float)),
@@ -130,11 +136,14 @@ class SttService(Service):
         self._gov_sub = None
         self._engine: Optional[WhisperTranscriber] = None
         self._force_cpu = False
-        self._queue: deque = deque()
-        self._work: asyncio.Queue = asyncio.Queue()
-        self._worker: Optional[asyncio.Task] = None
         self._loader: Optional[asyncio.Task] = None
         self._device = "cpu"
+        # Single-flight: at most one transcription in flight, ever. ``_busy`` is
+        # set before the lock is acquired so a turn arriving in the same tick is
+        # dropped as busy instead of slipping past the check.
+        self._lock = asyncio.Lock()
+        self._busy = False
+        self._dropped_busy = 0
 
     # -- setup -------------------------------------------------------------
     async def init(self) -> None:
@@ -203,7 +212,6 @@ class SttService(Service):
         self._gov_sub = self.bus.subscribe("GovernorThrottled", self._on_throttled, policy="drop_new", maxsize=1)
         readiness.mark_not_ready("stt")
         self._loader = self.spawn(self._load_engine(), "stt-load")
-        self._worker = self.spawn(self._worker_loop(), "stt-worker")
 
     async def on_stop(self) -> None:
         for sub in (self._sub, self._gov_sub):
@@ -211,18 +219,17 @@ class SttService(Service):
                 self.bus.unsubscribe(sub)
         self._sub = self._gov_sub = None
         readiness.mark_not_ready("stt")
-        for task in (self._worker, self._loader):
-            if task is not None:
-                task.cancel()
-        self._worker = self._loader = None
-        self._queue.clear()
+        if self._loader is not None:
+            self._loader.cancel()
+        self._loader = None
+        self._busy = False
 
     async def _on_throttled(self, event: Event) -> None:
         if not self._force_cpu:
             self._force_cpu = True
             self.log.warning("Governor throttled: STT pinned to CPU-safe compute type")
 
-    # -- queueing ----------------------------------------------------------
+    # -- admission ---------------------------------------------------------
     def _age_s(self, end_index: Optional[int]) -> float:
         """How long ago this turn's audio ended (absolute sample arithmetic)."""
         if end_index is None:
@@ -231,7 +238,14 @@ class SttService(Service):
         return max(0.0, behind / float(self._store.sample_rate))
 
     async def _on_turn(self, event: Event) -> None:
-        """Enqueue and return immediately — never block the bus on Whisper."""
+        """Transcribe one turn at a time; drop anything that arrives meanwhile.
+
+        No queue: while a transcript is in flight every new turn is discarded
+        (``stt.dropped_busy``). Whisper cannot be cancelled, so a queue only ever
+        bought a backlog — in noise, turns stacked up and the newest utterance
+        waited behind stale ones. A dropped turn is cheap to lose (the person can
+        repeat); a *late* reply is not.
+        """
         payload = dict(event.payload)
         age = self._age_s(payload.get("end_index"))
         if age > float(self.config.get("max_stale_s", 2.5)):
@@ -239,43 +253,45 @@ class SttService(Service):
             self.log.info("Dropping stale turn (already superseded)",
                           utterance_id=payload.get("utterance_id"), age_s=round(age, 2))
             return
-        max_queue = int(self.config.get("max_queue", 3))
-        while len(self._queue) >= max_queue:
-            dropped = self._queue.popleft()
-            self.metrics.inc("stt.dropped_overflow")
-            self.log.warning("STT queue full; dropping oldest turn",
-                             utterance_id=dropped.get("utterance_id"))
-        self._queue.append(payload)
-        self.metrics.inc("stt.enqueued")
-        self._work.put_nowait(payload)     # wake the worker; no polling
-
-    async def _worker_loop(self) -> None:
-        """Wake on demand (no polling): the queue hands work over directly."""
-        max_stale = float(self.config.get("max_stale_s", 2.5))
-        while True:
-            await self._work.get()            # wake-up signal only
-            if not self._queue:
-                continue                      # its payload was dropped as overflow
-            payload = self._queue.popleft()
-            if self._engine is None:
-                await readiness.wait_ready(["stt"], timeout=60.0)
-            # Re-check staleness at dequeue: a turn can wait here while the engine
-            # warms up, and answering a 6-second-old question is worse than
-            # dropping it (this is what made replies feel out of sync).
-            age = self._age_s(payload.get("end_index"))
-            if age > max_stale:
-                self.metrics.inc("stt.dropped_stale_late")
-                self.log.info("Dropping turn that went stale while queued",
-                              utterance_id=payload.get("utterance_id"), age_s=round(age, 2))
-                continue
+        if self._busy or self._lock.locked():
+            # Claimed here (before the lock) so two turns in the same tick cannot
+            # both pass the check; the lock itself serialises the transcript.
+            self._busy = True
+            self._dropped_busy += 1
+            self.metrics.inc("stt.dropped_busy")
+            self.log.info("Dropping turn: transcription already in flight",
+                          utterance_id=payload.get("utterance_id"),
+                          dropped_busy=self._dropped_busy)
+            return
+        self._busy = True
+        async with self._lock:
             try:
-                await self._transcribe(payload)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:      # a bad turn must not kill the worker
-                self.metrics.inc("stt.errors")
-                self.log.exception("Transcription failed")
-                self.log.warning("Transcription error detail", error=str(exc))
+                await self._process_turn(payload)
+            finally:
+                self._busy = False
+
+    async def _process_turn(self, payload: dict) -> None:
+        """Wait for readiness, re-check staleness, then transcribe."""
+        if self._engine is None:
+            await readiness.wait_ready(["stt"], timeout=60.0)
+        # Re-check staleness after the wait: a turn can sit here while the engine
+        # warms up, and answering a 6-second-old question is worse than dropping
+        # it (this is what made replies feel out of sync).
+        max_stale = float(self.config.get("max_stale_s", 2.5))
+        age = self._age_s(payload.get("end_index"))
+        if age > max_stale:
+            self.metrics.inc("stt.dropped_stale_late")
+            self.log.info("Dropping turn that went stale while waiting",
+                          utterance_id=payload.get("utterance_id"), age_s=round(age, 2))
+            return
+        try:
+            await self._transcribe(payload)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:      # a bad turn must not kill the service
+            self.metrics.inc("stt.errors")
+            self.log.exception("Transcription failed")
+            self.log.warning("Transcription error detail", error=str(exc))
 
     # -- transcription ------------------------------------------------------
     async def _transcribe(self, payload: dict) -> None:
@@ -294,14 +310,17 @@ class SttService(Service):
             self.metrics.inc("stt.skipped_short")
             return
 
-        queue_wait = self._age_s(end)
+        # Time from this turn's audio ending to the transcript actually starting.
+        # With no queue this is just the turn-detection + admission latency, and
+        # it is the number that must stay small for a reply to feel in sync.
+        pickup_wait = self._age_s(end)
         text, elapsed, language, lang_prob = await asyncio.to_thread(self._engine.transcribe, audio)
         duration = audio.size / self._store.sample_rate
         rtf = elapsed / duration if duration > 0 else 0.0
         self.metrics.observe("stt.rtf", rtf)
         self.metrics.observe("stt.latency_s", elapsed)
         self.metrics.observe("stt.audio_s", duration)
-        self.metrics.observe("stt.queue_wait_s", queue_wait)
+        self.metrics.observe("stt.queue_wait_s", pickup_wait)
         if language:
             self.metrics.inc(f"stt.language.{language}")
         if len(text) < int(self.config.get("min_chars", 2)):
@@ -312,7 +331,7 @@ class SttService(Service):
         self.log.info("Utterance transcribed", utterance_id=payload.get("utterance_id"),
                       text=text, language=language, duration_s=round(duration, 2),
                       rtf=round(rtf, 2), latency_s=round(elapsed, 2),
-                      queue_wait_s=round(queue_wait, 2))
+                      queue_wait_s=round(pickup_wait, 2))
         await self.bus.publish(Event("UtteranceHeard", {
             "utterance_id": payload.get("utterance_id"),
             "text": text,
@@ -320,7 +339,7 @@ class SttService(Service):
             "language_probability": round(float(lang_prob), 3) if lang_prob is not None else None,
             "duration_s": round(duration, 3),
             "rtf": round(rtf, 3),
-            "queue_wait_s": round(queue_wait, 3),
+            "queue_wait_s": round(pickup_wait, 3),
             "speaker": payload.get("speaker"),
             "voiceprint_similarity": payload.get("voiceprint_similarity"),
             "eou_latency_ms": payload.get("eou_latency_ms"),

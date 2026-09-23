@@ -135,6 +135,8 @@ def run_fixture(fixture: pathlib.Path) -> dict:
         "utterances": int(counters.get("stt.utterances", 0)),
         "discarded": int(counters.get("eou.discarded", 0)),
         "dropped_stale": int(counters.get("stt.dropped_stale", 0)),
+        # Turns that arrived while Whisper was busy (single-flight drop, no queue).
+        "dropped_busy": int(counters.get("stt.dropped_busy", 0)),
         "text": heard[-1].get("text", "") if heard else "",
         "language": heard[-1].get("language") if heard else None,
         "voice": synth[-1].get("voice") if synth else None,
@@ -238,7 +240,10 @@ def main() -> int:
         print(f"STT RTF max        : {rtf_max:.2f}")
     waits = [r["stt_queue_wait_s"] for _, _, r, _ in rows if r.get("stt_queue_wait_s") is not None]
     if waits:
-        print(f"STT queue wait p50 : {sorted(waits)[len(waits)//2] * 1000:.0f} ms")
+        print(f"STT pickup wait p50: {sorted(waits)[len(waits)//2] * 1000:.0f} ms")
+    busy = sum(r.get("dropped_busy", 0) for _, _, r, _ in rows)
+    if busy:
+        print(f"STT dropped (busy) : {busy} turn(s) arrived mid-transcript (dropped, not queued)")
     if language_failures:
         print("language failures  :")
         for problem in language_failures:

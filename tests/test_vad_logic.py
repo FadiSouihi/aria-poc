@@ -75,7 +75,9 @@ def test_reset_abandons_in_flight_utterance():
 
 
 # -- half-duplex guard (echo protection while TTS plays) ------------------------
-def test_ducking_window_opens_on_speech_and_closes_on_barge_in():
+def test_ducking_window_opens_on_speech_and_covers_the_echo_tail():
+    import time
+
     from aria.audio.vad import VadService
     from aria.core.events import Event
     from helpers import attach, make_bus, run
@@ -83,20 +85,69 @@ def test_ducking_window_opens_on_speech_and_closes_on_barge_in():
     async def scenario():
         bus = make_bus()
         await bus.start()
-        svc = attach(VadService(), bus, {"duck_while_speaking": True, "duck_margin_s": 0.0})
+        svc = attach(VadService(), bus, {"duck_while_speaking": True, "duck_margin_s": 0.0,
+                                        "post_speech_guard_s": 0.8})
         await svc.init()
         await svc.start()
         assert svc._ducking() is False
 
         svc._machine.update(0.9)
         svc._machine.update(0.9)                      # utterance in flight
+        before = time.monotonic()
         await svc._on_synthesized(Event("SpeechSynthesized", {"audio_s": 5.0}))
         assert svc._ducking() is True
         assert svc._machine.speaking is False         # in-flight speech dropped
         assert svc.metrics.snapshot()["counters"]["vad.ducked_utterances"] == 1
+        # The window must outlive the audio by the echo-tail guard, not end with it.
+        assert svc._speaking_until - before >= 5.7
 
-        await svc._on_barge_in(Event("BargeIn", {}))  # genuine interruption ends ducking
-        assert svc._ducking() is False
+        # A barge-in stops playback but the speaker keeps ringing: the mic must
+        # stay ducked through the tail, or ARIA immediately re-hears itself.
+        await svc._on_barge_in(Event("BargeIn", {}))
+        assert svc._ducking() is True
+        assert svc._speaking_until >= time.monotonic() + 0.7
+        await svc.stop()
+        await bus.stop()
+    run(scenario())
+
+
+def test_speech_started_carries_its_loudness():
+    """TTS needs the level to tell a person from ARIA's own quieter echo, so the
+    level must travel on ``SpeechStarted`` (a missing field would silently make
+    every barge-in look genuine)."""
+    import numpy as np
+
+    from aria.audio.vad import VadService
+    from helpers import Collector, attach, make_bus, run
+
+    class StubStore:
+        """Deterministic: exactly one loud 512-sample frame exists."""
+
+        sample_rate = 16000
+
+        def read_since(self, start_index):
+            return np.full(max(0, 512 - int(start_index)), 0.25, dtype=np.float32)
+
+        def total_samples(self):
+            return 512
+
+    async def scenario():
+        bus = make_bus()
+        await bus.start()
+        seen = Collector()
+        bus.subscribe("SpeechStarted", seen, policy="block", maxsize=4)
+        svc = attach(VadService(), bus, {"duck_while_speaking": False})
+        await svc.init()
+        svc._vad = None                     # the level path must not need the model
+        await svc.start()                   # start() calls init() → inject the stub after
+        svc._store = StubStore()
+        svc._cursor = 512
+        assert svc._machine.update(0.9) is None      # one voiced frame so far
+        await svc._handle(0.9)                       # second → speech started
+        await seen.wait_for(1, timeout=2)
+        payload = seen.events[0].payload
+        assert payload["start_index"] == 0            # one frame back, not two
+        assert payload["dbfs"] == -12.0               # 0.25 RMS ≈ -12 dBFS
         await svc.stop()
         await bus.stop()
     run(scenario())

@@ -146,7 +146,7 @@ confirmed departure; stranger profiles auto-expire.
 |---|---|---|
 | 0 — Skeleton ✅ | primitives + observability + test scaffolding | services start/stop/restart from config; watchdog restarts in place; backpressure tested; structured logs + correlation ids; contract suite green |
 | 1 — Perception ✅ | real camera sources, YOLO26n + tracker, SceneManager, face pipeline, tamper, fixture recorder | 0/1/N via one code path; 3 s occlusion survives; identity stable; `bench_vision` in budget; scenario tests on fixtures |
-| 2 — Audio ✅ | VAD + Smart Turn, faster-whisper, voice-prints, TTS abstraction, barge-in v1 | FUNC-14 8/10/11/12 fixed in replay tests; measured EOU latency + false-response rate → **p50 47–62 ms; false-response 0.00; miss 0.00; RTF ≤0.31; EN/FR/AR transcribed in-language with language-matched voices; speech_end→transcript 880 ms; first audio 0.0 ms; clause gap 0.9 ms; 145/145 tests; idle CPU 0.54 cores** |
+| 2 — Audio ✅ | VAD + Smart Turn, faster-whisper, voice-prints, TTS abstraction, barge-in v1 | FUNC-14 8/10/11/12 fixed in replay tests; measured EOU latency + false-response rate → **p50 47–62 ms; false-response 0.00; miss 0.00; RTF ≤0.31; EN/FR/AR transcribed in-language with language-matched voices; speech_end→transcript 880 ms; first audio 0.0 ms; clause gap 0.9 ms; no self-echo loop and no turn backlog (findings 17–18); tests green; idle CPU 0.54 cores** |
 | 3 — Cognition | dialogue FSM, AttentionPolicy, LLM router, guardrails + masking | full conversation; NFR-06 probes mitigated; network cut → local model |
 | 4 — Memory | profiles, MemoryCards, recall, retention/wipes | FUNC-10 recall passes (same/next day); masking regressions pass |
 | 5 — Robustness | watchdog self-heal, hot reconnect, degradation modes, soak tests | camera crash heals in place; RSS returns to baseline; replug detected live |
@@ -162,11 +162,11 @@ Smart Turn v3.2 semantic model → hard timeouts) · noise/overheard speech
 · no recall → MemoryCards (P4)
 · language switching → **shipped as language *preservation*** (P2 ✅: speech is
 transcribed in the spoken language and answered with a voice for that language;
-nothing is translated — see §2) · reply backlog / "buffered voice" → bounded turn
-queue + `max_stale_s` + clause pipelining (P2 ✅: the 4.9 s tail is gone — max
-`speech_end→transcript` 4883 → 2362 ms at p50 ≈ 1.27 s, queue wait p50
-64–96 ms, and superseded turns are dropped instead of answered out of order;
-see §12.6)
+nothing is translated — see §2) · reply backlog / "buffered voice" → **shipped as single-flight STT** (P2 ✅: the
+4.9 s tail is gone — max `speech_end→transcript` 4883 → 2362 ms at p50 ≈ 1.27 s,
+pickup wait p50 64–96 ms, and superseded turns are dropped instead of answered
+out of order; a turn arriving while Whisper is busy is dropped rather than
+queued, so noise cannot build a backlog — see §12.6/§12.18)
 · overlapping speakers →
 one-at-a-time prompt now, diarization research later (P2/7) · face
 false-positive → multi-frame voting (P1) · spoof accepted → passive liveness
@@ -211,19 +211,20 @@ golden-file diffs.
    knob that trades "waits for you to continue" against "replies too eagerly"; it
    is a config value and a bench manifest entry, so the trade-off is measured per
    profile.
-6. **The "buffered voice" was a queue, not the microphone.** Live measurement
-   (`tools/report_latency.py`) showed `speech_end→transcript` p50 1144 ms but
-   **max 4883 ms** with transcripts arriving after the *next* utterance — STT
-   transcribed inline on the bus callback, so a second utterance queued behind the
-   first and the reply order looked scrambled. Fixed by a bounded turn queue with
-   a worker, `max_stale_s` (drop superseded turns, checked at enqueue *and*
-   dequeue) and a warm-up pass. Result: max `speech_end→transcript`
-   **4883 → 2362 ms** (p50 ≈ 1.27 s), queue wait p50 **64–96 ms**,
-   `transcript→decision` p50 **83 ms**, and no reply is ever spoken for an older
-   utterance than the one before it. The remaining p50 is Whisper decode +
-   320 ms of VAD silence + EOU, i.e. the honest floor for this model on this
-   laptop; a smaller multilingual model (`stt.model`) or a local TTS is the next
-   lever if it must be lower.
+6. **The "buffered voice" was serial transcription, not the microphone.** Live
+   measurement (`tools/report_latency.py`) showed `speech_end→transcript` p50
+   1144 ms but **max 4883 ms** with transcripts arriving after the *next*
+   utterance — STT transcribed inline on the bus callback, so a second utterance
+   waited behind the first and the reply order looked scrambled. Fixed by moving
+   transcription off the callback into a worker with `max_stale_s` (drop
+   superseded turns, checked at the door *and* after the readiness wait) and a
+   warm-up pass. Result: max `speech_end→transcript` **4883 → 2362 ms**
+   (p50 ≈ 1.27 s), pickup wait p50 **64–96 ms**, `transcript→decision` p50
+   **83 ms**, and no reply is ever spoken for an older utterance than the one
+   before it. The remaining p50 is Whisper decode + 320 ms of VAD silence + EOU,
+   i.e. the honest floor for this model on this laptop; a smaller multilingual
+   model (`stt.model`) or a local TTS is the next lever if it must be lower.
+   (Follow-up, finding 18: the worker's *queue* was itself a bug and is gone.)
 7. **A slow model load silently ate turns.** `SttService` subscribed to
    `TurnCompleted` *after* loading Whisper (~8 s), so anything spoken in that
    window was never seen by STT at all (found because a fixture bench reported
@@ -288,3 +289,24 @@ golden-file diffs.
     `vision.detect_hz` / raise `face.pace_every`; and (Phase 5) a "yield while
     speaking" policy so the vision cycle pauses during a turn instead of
     competing with it.
+17. **The robot answered itself (echo loop).** Live log (`logs/aria.log`): a reply
+    was published, and ~2.3 s later `SpeechStarted` fired at **-41.6 dBFS** — the
+    speaker's own audio coming back through the mic. It counted as a barge-in, so
+    playback stopped, the VAD's duck window was *cleared*, and the tail was then
+    heard as a new utterance and transcribed ("and meet your dog around the
+    corner."). Two fixes, both needed: the duck window now outlives the played
+    audio by an echo-tail guard (`vad.post_speech_guard_s`, 0.8 s) and is *not*
+    cleared on barge-in; and a barge-in must clear a loudness floor
+    (`tts.barge_in_min_dbfs`, -32 dBFS) — the person measured -21…-27 dBFS, the
+    echo -41 dBFS. Quiet echo is ignored (`tts.barge_in_ignored_quiet`) and the
+    reply is finished. True full-duplex still needs AEC (Phase 5/7).
+18. **The turn queue was the "stuck in noise" bug.** Whisper is serial and cannot
+    be interrupted, so a queue of turns only ever became a backlog: every noise
+    burst with enough pause to end a turn added an item, and the *newest*
+    utterance waited behind older ones (measured in the live log as transcripts
+    arriving 1-2 utterances late, e.g. "Voilà." transcribed after two newer
+    segments had already been decided). STT is now **single-flight**: while a
+    transcript is in flight a new turn is dropped (`stt.dropped_busy`) instead of
+    queued, so the next genuine utterance is transcribed the moment Whisper is
+    free and nothing is ever answered out of order. Staleness (`max_stale_s`)
+    remains for the cold-model case.

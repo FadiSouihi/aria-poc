@@ -1,9 +1,11 @@
-"""Contract tests: STT queueing, staleness and language pass-through.
+"""Contract tests: STT admission policy, staleness and language pass-through.
 
 These run without the Whisper model: a fake engine stands in, so the *policy*
-(what gets transcribed, when it is dropped, what language is reported) is
-tested deterministically.
+(what gets transcribed, what is dropped while a transcript is in flight, what
+language is reported) is tested deterministically.
 """
+import asyncio
+
 import numpy as np
 
 from aria.audio.stt import SttService
@@ -29,6 +31,21 @@ class FakeEngine:
         return 1.0
 
 
+class BlockingEngine(FakeEngine):
+    """Transcription that stays in flight until the test releases it."""
+
+    def __init__(self, release, **kwargs):
+        super().__init__(**kwargs)
+        self.release = release          # threading.Event
+        self.started = False
+
+    def transcribe(self, audio):
+        self.calls += 1
+        self.started = True
+        self.release.wait(5.0)          # runs in a worker thread
+        return self.text, 0.05, self.language, self.prob
+
+
 class FakeStt(SttService):
     """SttService with the model swapped out (no load, no GPU)."""
 
@@ -49,7 +66,7 @@ class FakeStt(SttService):
 
 
 def _cfg(**overrides):
-    base = {"language": "auto", "max_stale_s": 2.5, "max_queue": 3, "warmup": False,
+    base = {"language": "auto", "max_stale_s": 2.5, "warmup": False,
             "heartbeat_interval": 0.05}
     base.update(overrides)
     return base
@@ -101,7 +118,7 @@ def test_stale_turn_is_dropped_instead_of_answered_late():
         await svc._on_turn(Event("TurnCompleted", {
             "utterance_id": "old", "start_index": 0, "end_index": total - RATE * 4}))
         assert svc.metrics.snapshot()["counters"].get("stt.dropped_stale") == 1
-        assert len(svc._queue) == 0
+        assert svc._busy is False
 
         # a fresh turn is accepted
         await svc._on_turn(Event("TurnCompleted", {
@@ -113,42 +130,70 @@ def test_stale_turn_is_dropped_instead_of_answered_late():
     run(scenario())
 
 
-def test_queue_overflow_drops_the_oldest_turn():
-    bus = make_bus()
-    svc = FakeStt()
-    from aria.core.config import Config
+def test_turn_arriving_while_transcribing_is_dropped_not_queued():
+    """The core fix: a turn that arrives mid-transcription must not queue behind
+    the one in flight (that backlog is what made ARIA answer old noise and look
+    stuck). It is dropped, and the *next* turn after the transcript is accepted."""
+    import threading
 
-    svc.attach(bus, Config(_cfg(max_queue=2), "<test>"))
-    svc._store = AudioStore(sample_rate=RATE, retained_s=20.0)
-    svc._engine = FakeEngine()
-    svc._store.append(np.zeros(RATE, dtype=np.float32))
-    total = svc._store.total_samples()
+    release = threading.Event()
+    engine = BlockingEngine(release)
 
-    import asyncio
+    async def scenario():
+        bus = make_bus()
+        await bus.start()
+        heard = Collector()
+        bus.subscribe("UtteranceHeard", heard, policy="block", maxsize=8)
+        svc = attach(FakeStt(engine=engine), bus, _cfg())
+        await svc.start()
+        svc._store.append(np.zeros(RATE, dtype=np.float32))
+        total = svc._store.total_samples()
 
-    async def enqueue_three():
-        for uid in ("a", "b", "c"):
+        first = asyncio.create_task(svc._on_turn(Event("TurnCompleted", {
+            "utterance_id": "u1", "start_index": 0, "end_index": total})))
+        for _ in range(200):                       # wait until Whisper is busy
+            if engine.started:
+                break
+            await asyncio.sleep(0.005)
+        assert engine.started, "transcription never started"
+
+        for uid in ("u2", "u3"):                   # noise arriving mid-transcript
             await svc._on_turn(Event("TurnCompleted", {
                 "utterance_id": uid, "start_index": 0, "end_index": total}))
-    asyncio.run(enqueue_three())
+        counters = svc.metrics.snapshot()["counters"]
+        assert counters.get("stt.dropped_busy") == 2
+        assert engine.calls == 1                   # nothing queued, nothing extra run
 
-    assert len(svc._queue) == 2
-    assert [p["utterance_id"] for p in svc._queue] == ["b", "c"]
-    assert svc.metrics.snapshot()["counters"].get("stt.dropped_overflow") == 1
+        release.set()
+        await first
+        await heard.wait_for(1, timeout=3)
+        assert [e.payload["utterance_id"] for e in heard.events] == ["u1"]
+
+        # The next genuine turn is transcribed once the service is free again.
+        await svc._on_turn(Event("TurnCompleted", {
+            "utterance_id": "u4", "start_index": 0, "end_index": total}))
+        await heard.wait_for(2, timeout=3)
+        assert [e.payload["utterance_id"] for e in heard.events] == ["u1", "u4"]
+        assert engine.calls == 2
+        assert svc._busy is False
+        await svc.stop()
+        await bus.stop()
+    run(scenario())
 
 
-def test_turn_that_goes_stale_while_queued_is_dropped():
+def test_turn_that_goes_stale_while_waiting_is_dropped():
     """A turn accepted while the engine warms up must not be answered minutes
-    later: staleness is re-checked when the worker actually picks it up."""
-    import asyncio
-
+    later: staleness is re-checked *after* the readiness wait, not only at the
+    door (that is what made replies feel out of sync at start-up)."""
     from aria.core import readiness
 
     release = asyncio.Event()
 
     class SlowLoadStt(FakeStt):
         async def _load_engine(self) -> None:
-            await release.wait()               # engine not ready yet
+            self._engine = None                # not warm yet
+            readiness.mark_not_ready("stt")
+            await release.wait()
             self._engine = self._fake_engine
             readiness.mark_ready("stt")
 
@@ -161,18 +206,18 @@ def test_turn_that_goes_stale_while_queued_is_dropped():
         await svc.start()
         svc._store.append(np.zeros(RATE, dtype=np.float32))
         total = svc._store.total_samples()
-        await svc._on_turn(Event("TurnCompleted", {
-            "utterance_id": "u1", "start_index": 0, "end_index": total}))   # fresh now
-        assert len(svc._queue) == 1
+        # Fresh at the door, but the engine is cold → it waits inside the service.
+        task = asyncio.create_task(svc._on_turn(Event("TurnCompleted", {
+            "utterance_id": "u1", "start_index": 0, "end_index": total})))
+        await asyncio.sleep(0.05)
+        assert svc._busy is True and heard.events == []      # held, not transcribed
 
-        svc._store.append(np.zeros(RATE * 4, dtype=np.float32))              # 4 s pass
+        svc._store.append(np.zeros(RATE * 4, dtype=np.float32))   # 4 s of engine warm-up
         release.set()
-        for _ in range(200):                                                 # let worker run
-            if svc.metrics.snapshot()["counters"].get("stt.dropped_stale_late"):
-                break
-            await asyncio.sleep(0.02)
+        await asyncio.wait_for(task, timeout=5)
 
         assert svc.metrics.snapshot()["counters"].get("stt.dropped_stale_late") == 1
+        assert svc._busy is False
         assert heard.events == []
         await svc.stop()
         await bus.stop()

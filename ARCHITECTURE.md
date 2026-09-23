@@ -1,4 +1,4 @@
-﻿# ARIA-POC — Architecture (Phases 0–2)
+# ARIA-POC — Architecture (Phases 0–2)
 
 Companion to `ROADMAP.md`. This document explains how the running system is
 wired and the rules that keep features swappable and testable.
@@ -47,12 +47,12 @@ load_config(profile)
 | `perception/transform.py` | Pure view transforms: `apply_flip` (none/horizontal/vertical/both), `flip_bbox` (map boxes into the flipped view), `fit_to_window` (aspect-preserving letterbox); no camera or GUI needed, so they are unit tested |
 | `audio/store.py` | Audio twin of `FrameStore`: bounded ring buffer of 16 kHz float32 samples with *exact* retention (head chunk is trimmed, not just dropped), absolute sample indices so any consumer can request `read_since(idx)` |
 | `audio/mic.py` | Capture source `device` / `file` / `fake` with a threaded grabber; publishes `AudioChunk` metadata only; hot reconnect on device loss; optional `wait_for_ready: ["stt"]` gates a replay until dependencies are warm; a non-looping fixture announces `AudioSourceFinished` so replay runs (benchmarks, regression tests) end deterministically |
-| `audio/vad.py` | Silero VAD v5 **directly on ONNX** (no torch/torchaudio) with the 64-sample context v5 requires; pure `VadStateMachine` (threshold, start/silence frames, hard timeout) publishes `SpeechStarted`/`SpeechEnded` with absolute sample indices; **half-duplex ducking** ignores mic audio while TTS plays (config `duck_while_speaking`) |
+| `audio/vad.py` | Silero VAD v5 **directly on ONNX** (no torch/torchaudio) with the 64-sample context v5 requires; pure `VadStateMachine` (threshold, start/silence frames, hard timeout) publishes `SpeechStarted` (with its dBFS) / `SpeechEnded` with absolute sample indices; **half-duplex ducking** ignores mic audio while TTS plays and keeps ignoring it through the speaker's echo tail (`duck_while_speaking`, `post_speech_guard_s`) |
 | `audio/turn.py` | Three-tier end-of-turn: pure `EouTracker` (`complete` / `wait` / `discard`) driven by a semantic `EouClassifier` — `SmartTurnClassifier` (ONNX + numpy whisper log-mel, right-aligned window) with `HeuristicEouClassifier` as config fallback; publishes `TurnCompleted` |
-| `audio/stt.py` | faster-whisper (CTranslate2), `task="transcribe"` with `language: auto` — **it never translates**; subscribes *before* loading its model (background load + warmup) so no turn is lost, then serves a bounded turn queue, dropping turns that are already stale (`max_stale_s`, re-checked at dequeue); publishes `UtteranceHeard` with `language`/`language_probability`/`queue_wait_s`; demotes to CPU on `GovernorThrottled` |
+| `audio/stt.py` | faster-whisper (CTranslate2), `task="transcribe"` with `language: auto` — **it never translates**; subscribes *before* loading its model (background load + warmup) so no turn is lost, then transcribes **single-flight**: one turn at a time, a turn arriving while Whisper is busy is dropped (`stt.dropped_busy`) instead of queued, and a turn whose speech ended more than `max_stale_s` ago is dropped too (re-checked after the readiness wait); publishes `UtteranceHeard` with `language`/`language_probability`/`queue_wait_s`; demotes to CPU on `GovernorThrottled` |
 | `audio/gate.py` | Pure `AddressedSpeechGate` + service: accepts only speech that is long enough, from an engaged person, and not a known *other* speaker; publishes `UtteranceAccepted` / `UtteranceRejected` with a machine-readable reason (the false-response metric) |
 | `audio/voiceprint.py` | `VoiceGallery` (cosine match against `data/voices/*.npz`) + provider chain `wavlm` (raw-waveform ONNX x-vectors) → `resemblyzer` → `speechbrain`; publishes `VoiceprintIdentified`; stays idle (gate degrades to engagement-only) if no provider loads |
-| `audio/tts.py` | TTS providers `edge` (default) / `sapi` (offline) / `fake` (hermetic) behind one interface, each taking `(text, language, voice)`; `tts.voices` maps a language code → voice (config-only language support, missing code → default + `tts.no_voice.<code>`); long replies are split into clauses and **pipelined** (clause *n+1* is synthesized while *n* plays) with an LRU cache, and all clauses play through **one** low-latency output stream (reopening per clause was audible dead air, tracked as `tts.clause_gap_ms`); `warm_phrases` pre-synthesizes canned lines at start-up so a reply's first clause is instant; one `SpeechSynthesized` per clause keeps ducking/barge-in accurate; a failed primary falls back offline for a **cooldown**, never permanently (an offline voice cannot speak Arabic/French) |
+| `audio/tts.py` | TTS providers `edge` (default) / `sapi` (offline) / `fake` (hermetic) behind one interface, each taking `(text, language, voice)`; `tts.voices` maps a language code → voice (config-only language support, missing code → default + `tts.no_voice.<code>`); long replies are split into clauses and **pipelined** (clause *n+1* is synthesized while *n* plays) with an LRU cache, and all clauses play through **one** low-latency output stream (reopening per clause was audible dead air, tracked as `tts.clause_gap_ms`); `warm_phrases` pre-synthesizes canned lines at start-up so a reply's first clause is instant; one `SpeechSynthesized` per clause keeps ducking/barge-in accurate; barge-in is **evidence-gated** (`barge_in_min_dbfs`) so the robot's own quieter speaker echo is ignored rather than stopping playback (`tts.barge_in_ignored_quiet`); a failed primary falls back offline for a **cooldown**, never permanently (an offline voice cannot speak Arabic/French) |
 | `audio/responder.py` | Phase 3 placeholder: `UtteranceAccepted` → templated `SpeakRequest`, so the audio loop is demonstrable end-to-end before the dialogue layer exists; templates are per-language (`templates: {fr: ...}`) and the language travels with the reply, so ARIA answers in the language she was spoken to |
 
 ## Event registry (Phase 0–2 vocabulary)
@@ -78,17 +78,19 @@ watchdog restart does not duplicate subscriptions.
 mic ──AudioChunk──▶ AudioStore (ring buffer)
                       │
         VadService ───┘ walks each 512-sample frame once (cursor), 64-sample
-          │            context per call, ducked while TTS plays
-          ├──SpeechStarted──▶ (barge-in path → TtsService stops playback)
+          │            context per call, ducked while TTS plays (+ echo tail)
+          ├──SpeechStarted──▶ (barge-in path → TtsService stops playback;
+          │                    carries its dBFS so echo is not a barge-in)
           └──SpeechEnded ──▶ TurnDetectorService
                                tier 1: VAD silence already elapsed
                                tier 2: Smart Turn v3.2 p_turn ≥ threshold → complete
                                tier 3: pending_timeout / max_utterance → complete
                                        short + low confidence → discard (noise)
-                               └──TurnCompleted──▶ SttService (turn queue)
-                                                    │  drop if already stale
-                                                    │  (max_stale_s, at enqueue
-                                                    │   and again at dequeue)
+                               └──TurnCompleted──▶ SttService (single-flight)
+                                                    │  one transcript at a time;
+                                                    │  new turns while busy are
+                                                    │  DROPPED, not queued;
+                                                    │  stale turns dropped too
                                                     └─UtteranceHeard(language)──▶
                                                     VoiceprintService ──▶ Gate
 Gate ──UtteranceAccepted──▶ Responder(stub, language-aware) ──SpeakRequest──▶ TtsService
@@ -102,11 +104,14 @@ false-response rate is measured (`tools/bench_audio.py`) rather than assumed.
 
 Three rules keep the loop from drifting out of sync with the person speaking:
 
-1. **The turn queue is bounded and staleness-checked.** If transcription falls
-   behind (or the model is still warming up), a turn whose speech ended more than
-   `max_stale_s` ago is *dropped* rather than answered late. Answering an old
-   question after a new one is what "the voice gets buffered" felt like
-   (`stt.dropped_stale*`, `QUEUED`/`STALE` in `tools/report_latency.py`).
+1. **Transcription is single-flight; a turn that arrives while it is busy is
+   dropped, not queued.** Whisper cannot be interrupted, so a queue only ever
+   bought a backlog: in a noisy room every burst that ended a turn added an item,
+   and the newest utterance waited behind stale noise — which is what "it gets
+   stuck and answers old things" felt like. Staleness is still checked
+   (`max_stale_s`, at the door and again after the readiness wait) for the
+   start-up case where the model is not warm yet (`stt.dropped_busy`,
+   `stt.dropped_stale*`).
 2. **Text is never translated.** `language: auto` + `task="transcribe"`; the
    detected language rides along on `UtteranceHeard` and `SpeakRequest`, where it
    selects a voice (`tts.voices`) and a reply template — a *voice* choice, not a
@@ -115,6 +120,12 @@ Three rules keep the loop from drifting out of sync with the person speaking:
    *n* plays, so time-to-first-audio is one clause rather than the whole reply,
    and each clause publishes `SpeechSynthesized` just before it plays (which is
    also what extends the VAD duck window and what barge-in interrupts).
+4. **ARIA does not answer itself.** With a speaker and no AEC the mic hears the
+   reply, so the VAD ducks the mic for the playback duration **plus an echo-tail
+   guard** (`post_speech_guard_s`), and a barge-in must clear a loudness floor
+   (`barge_in_min_dbfs`) to count. Without both, a quiet echo stopped playback,
+   reopened the duck window, and the robot transcribed and replied to its own
+   voice in a loop.
 
 ## Service contract
 
@@ -154,14 +165,16 @@ Three rules keep the loop from drifting out of sync with the person speaking:
   `SttService` subscribes in `on_start` and loads/warms its model in a background
   task (`core/readiness.mark_ready("stt")` when done); its config block is listed
   *first* so the load overlaps vision startup. Replay sources can additionally
-  wait (`mic.wait_for_ready: ["stt"]`). Anything spoken before warm-up is dropped
-  as stale — never answered minutes later.
+  wait (`mic.wait_for_ready: ["stt"]`). A turn admitted before warm-up waits for
+  readiness and is then re-checked for staleness, so anything spoken before
+  warm-up is dropped as stale — never answered minutes later.
 - **Testing:** every service has a contract suite; fakes live in
   `tests/helpers.py` / `tests/dummies.py`; `configs/test.yaml` runs the whole
   stack hermetically (fast timers, tiny queues, quiet console). Policy suites
-  (`test_stt_logic.py`, `test_tts.py`, `test_watchdog.py`) inject a fake engine
-  and assert the *behaviour* — stale drops, language pass-through, voice
-  selection, clause pipelining, cache hits, restart margins — without models.
+  (`test_stt_logic.py`, `test_vad_logic.py`, `test_tts.py`, `test_watchdog.py`)
+  inject a fake engine and assert the *behaviour* — busy drops, stale drops,
+  language pass-through, voice selection, echo-tail ducking, barge-in loudness
+  gating, clause pipelining, cache hits, restart margins — without models.
 
 ## Resource budget (measured, not assumed)
 
